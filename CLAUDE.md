@@ -29,4 +29,5 @@ there). It reads the key from an env var, so set it once:
 _TODO: languages, frameworks, structure, naming, anything the group standardizes on._
 
 ## Decisions
-_TODO: log the calls we make as a team so nobody re-litigates them._
+- Backend runs on AWS Lambda with DynamoDB for storage (2026-07-14). The
+  FastAPI app in `apps/api` is the local dev shape; it deploys to Lambda.
