@@ -1,0 +1,296 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import './sjsu/sjsu.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@utility container {
+  margin-inline: auto;
+  padding-inline: 2rem;
+  @media (width >= --theme(--breakpoint-sm)) {
+    max-width: none;
+  }
+  @media (width >= 1400px) {
+    max-width: 1400px;
+  }
+  @media (width >= 800px) {
+    max-width: 800px;
+  }
+}
+
+@theme {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --color-slate700: #334155;
+  --color-slate200: #e2e8f0;
+  --color-slate50: #f8fafc;
+  --color-slate900: #0f172a;
+  --color-slate500: #64748b;
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+  --animate-slideDown: slideDown 0.2s ease-out;
+  --animate-pulse-glow: pulse-glow 2s ease-in-out infinite;
+
+  --shadow-customCard: 0px 4px 6px 0px rgba(0, 0, 0, 0.05);
+  --shadow-field: 0px 1px 2px 0px rgba(0, 0, 0, 0.05);
+
+  --font-sans: Inter, sans-serif;
+  --font-inter: Inter, sans-serif;
+  --font-grotesk: Grotesk, sans-serif;
+  --font-grotesk-display: GroteskDisplay, sans-serif;
+  --font-system:
+    system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto,
+    Helvetica Neue, Arial, sans-serif;
+
+  --z-index-dropdown: var(--z-dropdown);
+  --z-index-sticky: var(--z-sticky);
+  --z-index-fixed: var(--z-fixed);
+  --z-index-modal-backdrop: var(--z-modal-backdrop);
+  --z-index-modal: var(--z-modal);
+  --z-index-popover: var(--z-popover);
+  --z-index-tooltip: var(--z-tooltip);
+  --z-index-intercom: var(--z-intercom);
+  --z-index-app-overlay: var(--z-app-overlay);
+  --z-index-app-modal: var(--z-app-modal);
+  --z-index-app-popover: var(--z-app-popover);
+
+  @keyframes accordion-down {
+    from {
+      height: 0;
+    }
+    to {
+      height: var(--radix-accordion-content-height);
+    }
+  }
+  @keyframes accordion-up {
+    from {
+      height: var(--radix-accordion-content-height);
+    }
+    to {
+      height: 0;
+    }
+  }
+  @keyframes slideDown {
+    from {
+      transform: translateY(-4px);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+  @keyframes pulse-glow {
+    0%,
+    100% {
+      box-shadow: inset 0 0 20px 4px rgba(50, 185, 198, 0.3);
+    }
+    50% {
+      box-shadow: inset 0 0 0px 0px rgba(50, 185, 198, 0);
+    }
+  }
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@font-face {
+  font-family: "Grotesk";
+  src: url("./assets/fonts/SharpGrotesk-Medium20.otf") format("opentype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+.radix-themes {
+  --focus-8: #0f172a !important;
+}
+
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
+    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-family: "Inter", sans-serif;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
+    monospace;
+}
+
+h1 {
+  font-family: GroteskDisplay, sans-serif;
+  line-height: 120%;
+}
+
+.text-gradient {
+  background: linear-gradient(111deg, #f2c553 13.59%, #fff 82.2%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* mobile version */
+@media (max-width: 768px) {
+  .intercom-launcher {
+    bottom: 64px !important;
+  }
+}
+
+/* Fix text selection in all overlay components (vaul, Radix Dialog/Sheet/Popover) */
+[data-vaul-drawer],
+[data-radix-dialog-content],
+[data-radix-popover-content],
+[role="dialog"] {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+/* Fix text selection for @radix-ui/themes components */
+.rt-DialogContent,
+.rt-AlertDialogContent,
+.rt-PopoverContent,
+.rt-HoverCardContent {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+[data-vaul-drawer] input,
+[data-vaul-drawer] textarea,
+[data-radix-dialog-content] input,
+[data-radix-dialog-content] textarea,
+[role="dialog"] input,
+[role="dialog"] textarea,
+.rt-DialogContent input,
+.rt-DialogContent textarea,
+.rt-AlertDialogContent input,
+.rt-AlertDialogContent textarea,
+.rt-PopoverContent input,
+.rt-PopoverContent textarea,
+input,
+textarea {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+/* Waveform fade animation for voice recording */
+@keyframes fade {
+  0% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.3;
+  }
+}
+
+.animate-fade {
+  animation: fade 1.5s ease-in-out infinite;
+}
+
+/* Placeholder slide-up animation */
+@keyframes slideUp {
+  0% {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-up::placeholder {
+  animation: slideUp 0.4s ease-out;
+}
+
+/* Price slide animation */
+@keyframes slideInFromLeft {
+  0% {
+    transform: translateX(-10px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-price {
+  animation: slideInFromRight 0.3s cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+/* Scanning line animation for onboarding */
+@keyframes scan {
+  0%, 100% { top: 1.5rem; }
+  50% { top: calc(100% - 1.5rem); }
+}
+@keyframes hue-rotate {
+  0% { filter: hue-rotate(0deg); }
+  100% { filter: hue-rotate(360deg); }
+}
+.animate-scan {
+  animation: scan 3s ease-in-out infinite;
+}
+.animate-hue-rotate {
+  animation: hue-rotate 4s linear infinite;
+}
+
+/* Hide Mapbox logo */
+.mapboxgl-ctrl-logo {
+  display: none !important;
+}

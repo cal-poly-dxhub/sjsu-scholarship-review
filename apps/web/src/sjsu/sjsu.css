@@ -1,0 +1,469 @@
+/*
+ * SJSU theme — design system tokens, scoped to the `.sjsu-theme` wrapper.
+ * Anything outside the wrapper keeps its own base tokens.
+ *
+ * IMPORTANT: each `--color-*` token must be redeclared inside `.sjsu-theme`,
+ * not just the inner `--background` etc. Tailwind v4's `@theme` block in
+ * index.css compiles tokens at `:root` scope — the inner `var()` substitution
+ * happens at `:root`, so overriding `--background` alone doesn't change the
+ * already-computed `--color-background`.
+ */
+
+/*
+ * Custom variants — copied verbatim from `shadcn/tailwind.css` (the package
+ * the source design system imports). Without these, Tailwind v4 compiles `data-open:` as
+ * `[data-open]` only, which never matches Radix's `data-state="open"` →
+ * popover/dialog/etc. animations silently no-op. These broaden the selector
+ * to match BOTH `[data-state=open]` AND `[data-open]:not([data-open=false])`
+ * so animations fire on Radix primitives the same way as in the source design system.
+ */
+@custom-variant data-open {
+  &:where([data-state="open"]),
+  &:where([data-open]:not([data-open="false"])) {
+    @slot;
+  }
+}
+@custom-variant data-closed {
+  &:where([data-state="closed"]),
+  &:where([data-closed]:not([data-closed="false"])) {
+    @slot;
+  }
+}
+@custom-variant data-checked {
+  &:where([data-state="checked"]),
+  &:where([data-checked]:not([data-checked="false"])) {
+    @slot;
+  }
+}
+@custom-variant data-unchecked {
+  &:where([data-state="unchecked"]),
+  &:where([data-unchecked]:not([data-unchecked="false"])) {
+    @slot;
+  }
+}
+@custom-variant data-selected {
+  &:where([data-selected="true"]) {
+    @slot;
+  }
+}
+@custom-variant data-disabled {
+  &:where([data-disabled="true"]),
+  &:where([data-disabled]:not([data-disabled="false"])) {
+    @slot;
+  }
+}
+@custom-variant data-active {
+  &:where([data-state="active"]),
+  &:where([data-active]:not([data-active="false"])) {
+    @slot;
+  }
+}
+@custom-variant data-horizontal {
+  &:where([data-orientation="horizontal"]) {
+    @slot;
+  }
+}
+@custom-variant data-vertical {
+  &:where([data-orientation="vertical"]) {
+    @slot;
+  }
+}
+
+@font-face {
+  font-family: "Mondwest";
+  src: url("../assets/fonts/PPMondwest-Regular.woff2") format("woff2"),
+    url("../assets/fonts/PPMondwest-Regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Register SJSU-theme-only utilities globally so `bg-success`, `font-mondwest`, etc. exist as Tailwind classes. */
+@theme {
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-success-border: hsl(var(--success-border));
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+  --color-warning-border: hsl(var(--warning-border));
+  --color-sales-rank: hsl(var(--rank));
+  --color-sales-rank-foreground: hsl(var(--rank-foreground));
+  --color-sales-rank-border: hsl(var(--rank-border));
+  /* FBA / FBM tone-matched to sales-rank + warning recipe: saturated
+   * solid bg, border ~10% darker, foreground white-or-black based on bg
+   * lightness. Hue rotated from blue to green (FBA, white text) and
+   * from gold to true yellow (FBM, black text). */
+  --color-fba: hsl(var(--fba));
+  --color-fba-border: hsl(var(--fba-border));
+  --color-fbm: hsl(var(--fbm));
+  --color-fbm-border: hsl(var(--fbm-border));
+  --color-destructive-border: hsl(var(--destructive-border));
+  /* Amazon brand orange - the OG primary. Frozen (no theme-shift) so the
+   * Amazon-branded badges keep this hue even though --primary is now slate. */
+  --color-amazon: hsl(var(--amazon));
+  --color-amazon-border: hsl(var(--amazon-border));
+  --color-amazon-foreground: hsl(var(--amazon-foreground));
+  /* btn-* tokens are stored as complete hsl() values (not triples) because
+   * the source button references them via raw `var(--btn-border)` which
+   * needs a full CSS color, not an HSL component triple.
+   */
+  --color-btn-bg: var(--button-bg);
+  --color-btn-border: var(--btn-border);
+  --color-btn-text: var(--btn-text);
+  --color-btn-bg-hover: var(--button-bg-hover);
+
+  --font-mondwest: Mondwest, serif;
+}
+
+/* Default values for SJSU-theme-only tokens at :root so the @theme registrations resolve globally. */
+:root {
+  --success: 161 93% 30%;
+  --success-foreground: 0 0% 100%;
+  --success-border: 160 92% 24%;
+  --warning: 44 100% 72%;
+  --warning-foreground: 0 0% 10%;
+  --warning-border: 42 100% 65%;
+  --rank: 217 91% 60%;          /* tailwind blue-500 #3b82f6 */
+  --rank-foreground: 0 0% 100%;
+  --rank-border: 217 91% 50%;
+  --fba: 161 93% 30%;                 /* mirrors --success exactly */
+  --fba-border: 160 92% 24%;
+  --fbm: 44 100% 72%;                 /* mirrors --warning exactly */
+  --fbm-border: 42 100% 65%;
+  --destructive-border: 0 75% 40%;
+  --amazon: 18 97% 54%;               /* #FC5815 - OG primary orange */
+  --amazon-border: 17 99% 48%;        /* #F14702 */
+  --amazon-foreground: 0 0% 100%;
+  --button-bg: hsl(18 97% 54%);
+  --btn-border: hsl(17 99% 48%);
+  --btn-text: hsl(0 0% 100%);
+  --button-bg-hover: hsl(16 98% 62%);
+}
+
+/*
+ * SJSU light theme — base palette translated to HSL.
+ * Source: the base app global styles.
+ */
+.sjsu-theme {
+  /* Inner HSL triples — base palette. */
+  --background: 0 0% 98%;            /* #FAFAFA */
+  --foreground: 0 0% 4%;             /* #0A0A0A */
+  --card: 0 0% 96.5%;                /* #F6F6F6 */
+  --card-foreground: 0 0% 4%;
+  --popover: 0 0% 100%;              /* #FFFFFF */
+  --popover-foreground: 0 0% 4%;
+  --primary: 222.2 47.4% 11.2%;      /* slate-900 */
+  --primary-foreground: 210 40% 98%; /* white text on navy */
+  --amazon: 18 97% 54%;              /* #FC5815 - Amazon brand orange, frozen */
+  --amazon-border: 17 99% 48%;       /* #F14702 */
+  --amazon-foreground: 0 0% 100%;
+  --secondary: 0 0% 93%;             /* #EEEEEE */
+  --secondary-foreground: 0 0% 10%;
+  --muted: 0 0% 93%;
+  --muted-foreground: 0 0% 45%;      /* #737373 */
+  --accent: 0 0% 89%;                /* #E2E2E2 */
+  --accent-foreground: 0 0% 10%;
+  --destructive: 0 75% 50%;          /* approx oklch(0.55 0.22 10) */
+  --destructive-foreground: 0 0% 100%;
+  --destructive-border: 0 75% 40%;
+  --success: 161 93% 30%;            /* #059669 */
+  --success-foreground: 0 0% 100%;
+  --success-border: 160 92% 24%;
+  --warning: 44 100% 72%;            /* #FFD96F */
+  --warning-foreground: 0 0% 10%;
+  --warning-border: 42 100% 65%;
+  /* Pre-wrapped aliases for sonner — its own `--success-border` / `--warning-border`
+   * vars share names with ours, so `hsl(var(--success-border))` written on the
+   * toast element would self-reference. The bg vars (`--success-bg`) don't
+   * collide and can use `hsl(var(--success))` inline. */
+  --success-border-hsl: hsl(var(--success-border));
+  --warning-border-hsl: hsl(var(--warning-border));
+  --rank: 217 91% 60%;         /* tailwind blue-500 #3b82f6 */
+  --rank-foreground: 0 0% 100%;
+  --rank-border: 217 91% 50%;
+  --fba: 161 93% 30%;                 /* mirrors --success exactly */
+  --fba-border: 160 92% 24%;
+  --fbm: 44 100% 72%;                 /* mirrors --warning exactly */
+  --fbm-border: 42 100% 65%;
+  --border: 0 0% 89%;
+  --input: 0 0% 89%;
+  --ring: 222.2 84% 4.9%;            /* slate-950 */
+  --button-bg: hsl(222.2 47.4% 11.2%);  /* slate-900 */
+  --btn-border: hsl(217.2 32.6% 22%);   /* lighter navy = button hover */
+  --btn-text: hsl(0 0% 100%);
+  --button-bg-hover: hsl(217.2 32.6% 22%);
+  --radius: 0rem;
+
+  /*
+   * Re-resolve every `--color-*` token at this scope. Each `var(--token)`
+   * substitution now uses the base HSL triples above instead of inheriting
+   * the base app's :root values.
+   */
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-destructive-border: hsl(var(--destructive-border));
+  --color-amazon: hsl(var(--amazon));
+  --color-amazon-border: hsl(var(--amazon-border));
+  --color-amazon-foreground: hsl(var(--amazon-foreground));
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-success-border: hsl(var(--success-border));
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+  --color-warning-border: hsl(var(--warning-border));
+  --color-sales-rank: hsl(var(--rank));
+  --color-sales-rank-foreground: hsl(var(--rank-foreground));
+  --color-sales-rank-border: hsl(var(--rank-border));
+  --color-fba: hsl(var(--fba));
+  --color-fba-border: hsl(var(--fba-border));
+  --color-fbm: hsl(var(--fbm));
+  --color-fbm-border: hsl(var(--fbm-border));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-btn-bg: var(--button-bg);
+  --color-btn-border: var(--btn-border);
+  --color-btn-text: var(--btn-text);
+  --color-btn-bg-hover: var(--button-bg-hover);
+
+  /* Typography from base body styles. */
+  font-family: Inter, sans-serif;
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/*
+ * Reset the base app's global heading font (GroteskDisplay from index.css `h1 {...}`)
+ * inside the SJSU theme. the base app's bare-element rule is unlayered (highest priority) while
+ * Tailwind v4 utilities live in @layer utilities (lower) — meaning a plain
+ * `:where()` reset can't beat the base app's h1 nor let `.font-mondwest` win.
+ *
+ * The fix: bump our reset's specificity to (0,1,1) so it beats the base app's bare
+ * `h1` (0,0,1), then explicitly re-promote `.font-mondwest` inside the SJSU theme to
+ * (0,2,0) so it overrides the reset on opt-in.
+ */
+.sjsu-theme h1,
+.sjsu-theme h2,
+.sjsu-theme h3,
+.sjsu-theme h4,
+.sjsu-theme h5,
+.sjsu-theme h6 {
+  font-family: inherit;
+  line-height: inherit;
+}
+
+.sjsu-theme .font-mondwest {
+  font-family: var(--font-mondwest);
+  font-weight: 900;
+}
+
+/*
+ * SJSU dark theme — flipped HSL triples. The `.sjsu-theme` rule's `--color-*`
+ * declarations re-resolve automatically when --background etc. are overridden
+ * here, so no need to redeclare --color-* tokens in dark.
+ */
+.sjsu-theme.dark,
+.dark .sjsu-theme {
+  --background: 0 0% 4%;
+  --foreground: 0 0% 98%;
+  --card: 0 0% 8%;
+  --card-foreground: 0 0% 98%;
+  --popover: 0 0% 8%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 210 40% 98%;            /* white */
+  --primary-foreground: 222.2 47.4% 11.2%; /* dark text on white */
+  --amazon: 18 97% 54%;              /* #FC5815 - Amazon brand orange, frozen */
+  --amazon-border: 17 99% 48%;
+  --amazon-foreground: 0 0% 100%;
+  --secondary: 0 0% 9%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 0 0% 9%;
+  --muted-foreground: 0 0% 54%;
+  --accent: 0 0% 13%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 70% 60%;
+  --destructive-foreground: 0 0% 100%;
+  --destructive-border: 0 70% 48%;
+  --success: 161 93% 30%;
+  --success-foreground: 0 0% 100%;
+  --success-border: 160 92% 24%;
+  --warning: 44 100% 72%;
+  --warning-foreground: 0 0% 10%;
+  --warning-border: 42 100% 65%;
+  --rank: 217 91% 60%;
+  --rank-foreground: 0 0% 100%;
+  --rank-border: 217 91% 50%;
+  --fba: 161 93% 30%;                 /* mirrors --success exactly */
+  --fba-border: 160 92% 24%;
+  --fbm: 44 100% 72%;                 /* mirrors --warning exactly */
+  --fbm-border: 42 100% 65%;
+  --border: 0 0% 13%;
+  --input: 0 0% 13%;
+  --ring: 212.7 26.8% 83.9%;         /* slate-300 */
+  --button-bg: hsl(210 40% 98%);     /* white */
+  --btn-border: hsl(214.3 31.8% 88%);
+  --btn-text: hsl(222.2 47.4% 11.2%);
+  --button-bg-hover: hsl(214.3 31.8% 88%);
+}
+
+/*
+ * Slate palette - alternative base scale from the base app /the source app. Opt-in via
+ * the `slate` class, orthogonal to light/dark. Only surface/text triples are
+ * redeclared; brand, status, and destructive tokens inherit unchanged. Values
+ * copied verbatim from the base app's globals.css. card/popover == background (flat, no
+ * elevation contrast) to reproduce the base app's real look.
+ */
+.sjsu-theme.surface-slate {
+  --background: 0 0% 100%;
+  --foreground: 222.2 84% 4.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 222.2 84% 4.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222.2 84% 4.9%;
+  --secondary: 210 40% 96.1%;
+  --secondary-foreground: 222.2 47.4% 11.2%;
+  --muted: 210 40% 96.1%;
+  --muted-foreground: 215.4 16.3% 46.9%;
+  --accent: 210 40% 96.1%;
+  --accent-foreground: 222.2 47.4% 11.2%;
+  --border: 214.3 31.8% 91.4%;
+  --input: 214.3 31.8% 91.4%;
+}
+
+.sjsu-theme.surface-slate.dark,
+.dark .sjsu-theme.surface-slate {
+  --background: 222.2 84% 4.9%;
+  --foreground: 210 40% 98%;
+  --card: 222.2 84% 4.9%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222.2 84% 4.9%;
+  --popover-foreground: 210 40% 98%;
+  --secondary: 217.2 32.6% 17.5%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 217.2 32.6% 17.5%;
+  --muted-foreground: 215 20.2% 65.1%;
+  --accent: 217.2 32.6% 17.5%;
+  --accent-foreground: 210 40% 98%;
+  --border: 217.2 32.6% 17.5%;
+  --input: 217.2 32.6% 17.5%;
+}
+
+/*
+ * Colorblind-safe status palette. Opt-in via `colorblind-safe` class (toggled
+ * by theme.tsx). Overrides status triples only; placed after dark so it wins in
+ * both modes. Validated against Viénot dichromat sim + WCAG AA (ΔE2000 8.0-12.9).
+ * Blues differ by lightness (sales-rank dark, fba mid) to survive red-green blindness.
+ */
+.sjsu-theme.colorblind-safe,
+.sjsu-theme.colorblind-safe.dark,
+.dark .sjsu-theme.colorblind-safe {
+  --success: 163 94% 24%;
+  --success-border: 163 94% 19%;
+  --destructive: 24 100% 36%;
+  --destructive-border: 24 100% 30%;
+  --warning: 56 85% 60%;
+  --warning-border: 56 85% 52%;
+  --rank: 207 100% 27%;
+  --rank-border: 207 100% 22%;
+  --fba: 217 68% 52%;
+  --fba-border: 217 68% 44%;
+  --fbm: 41 100% 45%;
+  --fbm-border: 41 100% 38%;
+}
+
+/* Match the inner white highlight that filled badges use
+ * (badge.tsx applies shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1)] on the
+ * badge element). Sonner doesn't let us inject children, so we layer
+ * the inset onto the toast's own box-shadow while preserving sonner's
+ * default drop shadow. Scoped to filled rich-color types only, matching
+ * the badge's `filledVariants` set. */
+[data-sonner-toast][data-rich-colors='true'][data-type='success'],
+[data-sonner-toast][data-rich-colors='true'][data-type='warning'],
+[data-sonner-toast][data-rich-colors='true'][data-type='error'] {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+    0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+
+/* Pixel-sprite rattle for the lock icon (embed signed-out state).
+ * steps(1) = no tweening - shackle climbs in whole-pixel frames, holds
+ * open, slams shut in one frame; body dips 1px on impact. Opt-in via
+ * .lock-rattle on the svg; groups live in icons/icon-lock.tsx. */
+.lock-rattle {
+  /* svg default is overflow:hidden - the lifted shackle leaves the viewBox */
+  overflow: visible;
+}
+.lock-rattle .lock-shackle {
+  animation: lock-rattle-lift 3s steps(1) infinite;
+}
+.lock-rattle .lock-body {
+  animation: lock-rattle-thud 3s steps(1) infinite;
+}
+@keyframes lock-rattle-lift {
+  0%, 55%   { transform: translateY(0); }
+  58%       { transform: translateY(-1px); }
+  61%       { transform: translateY(-2px); }
+  64%, 80%  { transform: translateY(-3px); }
+  83%, 100% { transform: translateY(0); }
+}
+@keyframes lock-rattle-thud {
+  0%, 83%   { transform: translateY(0); }
+  84%       { transform: translateY(1px); }
+  89%, 100% { transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lock-rattle .lock-shackle,
+  .lock-rattle .lock-body {
+    animation: none;
+  }
+}
+
+/* Reusable skinny-scrollbar utility — opt in by adding .thin-scrollbar to any
+ * scroll container (calculator-page tags <html> with it while that page is
+ * mounted). Lives at document root (not in .sjsu-theme) so it also works on <html>,
+ * which sits above the theme wrapper for viewport-level scroll.
+ *
+ * Cross-browser pattern from developer.chrome.com/docs/css-ui/scrollbar-styling:
+ * the @supports fork stops Chrome 121+ (which honors standard scrollbar-width and
+ * then ignores ::-webkit-scrollbar) from clashing with older WebKit. Modern
+ * engines take the standard path; only legacy WebKit falls back to pixel widths. */
+.thin-scrollbar {
+  --thin-scrollbar-thumb: hsl(0 0% 0% / 0.22);
+  --thin-scrollbar-track: transparent;
+}
+@supports (scrollbar-width: thin) {
+  .thin-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: var(--thin-scrollbar-thumb) var(--thin-scrollbar-track);
+  }
+}
+@supports selector(::-webkit-scrollbar) {
+  .thin-scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .thin-scrollbar::-webkit-scrollbar-thumb {
+    background: var(--thin-scrollbar-thumb);
+    border-radius: 9999px;
+  }
+  .thin-scrollbar::-webkit-scrollbar-track {
+    background: var(--thin-scrollbar-track);
+  }
+}

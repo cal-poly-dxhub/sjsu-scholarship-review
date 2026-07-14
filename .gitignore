@@ -1,0 +1,22 @@
+# repo-scoped aws creds + personal launcher — never commit
+.aws-local/
+awsx
+
+# institutional data pulled from s3 — do not commit
+materials/
+
+# personal project notes + local claude settings (holds api keys) — local only
+CLAUDE.local.md
+.claude/settings.local.json
+
+# node / monorepo build junk
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.env
+.env.local
+
+# python (api)
+.venv/
+__pycache__/
