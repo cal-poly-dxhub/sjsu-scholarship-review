@@ -1,63 +1,70 @@
 import { useMemo, useState } from "react";
 import { Input } from "@/sjsu/components/ui/input";
 import { Badge } from "@/sjsu/components/ui/badge";
+import { Card, CardContent } from "@/sjsu/components/ui/card";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/sjsu/components/ui/table";
 import { SortableHead } from "@/sjsu/components/ui/sortable-head";
 import { useTableSort } from "@/sjsu/lib/use-table-sort";
+import { ChevronDown, ChevronRight, TriangleAlert } from "lucide-react";
+import { cn } from "@/sjsu/lib/utils";
+import { ApplicationReviewDialog } from "./application-review-dialog";
+import { DIVERGENCE_THRESHOLD, STUB_ROWS, type TableRow as AppRow } from "./review-data";
 
-type SortField = "student" | "scholarship" | "year" | "gpa";
-
-type Application = {
-  id: string;
-  student: string; // anonymized uuid, no PII
-  scholarship: string;
-  year: string;
-  major: string;
-  level: string;
-  gpa: number | null; // 26-27 SJSU General dropped the GPA column, so it's nullable
-  status: "pending" | "scored";
-};
-
-// mock rows until the db + ingest land. shape mirrors the xlsx reports in materials/.
-const ROWS: Application[] = [
-  { id: "1", student: "a1f3…9c2", scholarship: "SJSU Spartan", year: "25-26", major: "Computer Science", level: "Junior", gpa: 3.82, status: "pending" },
-  { id: "2", student: "b7e0…1d4", scholarship: "Engineering", year: "25-26", major: "Civil Engineering", level: "Transfer", gpa: 3.41, status: "pending" },
-  { id: "3", student: "c2a9…4f8", scholarship: "Physics", year: "25-26", major: "Physics", level: "Senior", gpa: 3.95, status: "pending" },
-  { id: "4", student: "d5c1…8b3", scholarship: "Lurie Education", year: "25-26", major: "Child Development", level: "Sophomore", gpa: 3.28, status: "pending" },
-  { id: "5", student: "e8b4…2a7", scholarship: "SJSU Spartan", year: "26-27", major: "Business Analytics", level: "Junior", gpa: null, status: "pending" },
-  { id: "6", student: "f0d2…7e1", scholarship: "Engineering", year: "26-27", major: "Mechanical Engineering", level: "Frosh", gpa: null, status: "pending" },
-  { id: "7", student: "a3e7…5c9", scholarship: "Physics", year: "26-27", major: "Astrophysics", level: "MS", gpa: 3.71, status: "pending" },
-  { id: "8", student: "b9f5…0a2", scholarship: "Lurie Education", year: "26-27", major: "Liberal Studies", level: "Senior", gpa: null, status: "pending" },
-];
+type SortField = "student" | "scholarship" | "gpa" | "score" | "delta";
 
 export function ApplicationsTable() {
   const [search, setSearch] = useState("");
+  const [showAgreed, setShowAgreed] = useState(false);
+  const [selected, setSelected] = useState<number | null>(null); // index into `visible`
   const { sortBy, sortDir, setSort } = useTableSort<SortField>();
   const sortProps = { sortBy, sortDir, onSort: setSort } as const;
 
-  const rows = useMemo(() => {
+  const { needsHuman, agreed } = useMemo(() => {
     const query = search.trim().toLowerCase();
     const filtered = query
-      ? ROWS.filter((r) =>
+      ? STUB_ROWS.filter((r) =>
           `${r.student} ${r.scholarship} ${r.major}`.toLowerCase().includes(query),
         )
-      : ROWS;
+      : STUB_ROWS;
 
-    if (!sortBy) return filtered;
+    // no sort picked = biggest split first, the pile is a worklist not a listing
     const dir = sortDir === "asc" ? 1 : -1;
-    return [...filtered].sort((a, b) => {
+    const sorted = [...filtered].sort((a, b) => {
+      if (!sortBy) return Math.abs(b.delta) - Math.abs(a.delta);
       if (sortBy === "gpa") return ((a.gpa ?? -1) - (b.gpa ?? -1)) * dir;
+      if (sortBy === "score") return (a.aiPercent - b.aiPercent) * dir;
+      if (sortBy === "delta") return (Math.abs(a.delta) - Math.abs(b.delta)) * dir;
       return String(a[sortBy]).localeCompare(String(b[sortBy])) * dir;
     });
+
+    return {
+      needsHuman: sorted.filter((r) => r.needsHuman),
+      agreed: sorted.filter((r) => !r.needsHuman),
+    };
   }, [search, sortBy, sortDir]);
+
+  // dialog navigates whatever is on screen, needs-human pile first
+  const visible = showAgreed ? [...needsHuman, ...agreed] : needsHuman;
+  const total = needsHuman.length + agreed.length;
+  // agreement is purely about the scores; the pile also pulls in low-confidence rows
+  const withinThreshold = [...needsHuman, ...agreed].filter((r) => Math.abs(r.delta) < DIVERGENCE_THRESHOLD).length;
+  const agreeRate = total === 0 ? 0 : Math.round((withinThreshold / total) * 100);
 
   return (
     <>
       <div className="mb-4 flex items-center gap-2">
         <h1 className="font-mondwest text-3xl">Applications</h1>
-        <Badge variant="secondary">{rows.length}</Badge>
+        <Badge variant="secondary">shadow run 25-26</Badge>
+        <Badge variant="warning">stub data</Badge>
+      </div>
+
+      {/* the health of the whole run, before any table reading */}
+      <div className="mb-6 grid max-w-2xl grid-cols-3 gap-3">
+        <StatCard value={total} label="applications scored" />
+        <StatCard value={`${agreeRate}%`} label="AI + human agree" />
+        <StatCard value={needsHuman.length} label="need a human" />
       </div>
 
       <Input
@@ -69,43 +76,125 @@ export function ApplicationsTable() {
 
       <Table>
         <colgroup>
-          <col className="w-32" />
-          <col className="w-40" />
-          <col className="w-20" />
-          <col className="w-56" />
           <col className="w-28" />
-          <col className="w-20" />
-          <col className="w-28" />
+          <col className="w-36" />
+          <col className="w-48" />
+          <col className="w-16" />
+          <col className="w-36" />
+          <col className="w-24" />
+          <col className="w-16" />
+          <col className="w-16" />
         </colgroup>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
             <SortableHead field="student" {...sortProps}>Student</SortableHead>
             <SortableHead field="scholarship" {...sortProps}>Scholarship</SortableHead>
-            <SortableHead field="year" {...sortProps}>Year</SortableHead>
             <TableHead>Major</TableHead>
-            <TableHead>Level</TableHead>
             <SortableHead field="gpa" {...sortProps}>GPA</SortableHead>
-            <TableHead>Status</TableHead>
+            <SortableHead field="score" {...sortProps}>AI score</SortableHead>
+            <TableHead>Conf</TableHead>
+            <TableHead>Human</TableHead>
+            <SortableHead field="delta" {...sortProps}>Δ</SortableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((row) => (
-            <TableRow key={row.id} className="cursor-pointer">
-              <TableCell className="font-medium">{row.student}</TableCell>
-              <TableCell>{row.scholarship}</TableCell>
-              <TableCell>{row.year}</TableCell>
-              <TableCell className="truncate text-muted-foreground">{row.major}</TableCell>
-              <TableCell className="text-muted-foreground">{row.level}</TableCell>
-              <TableCell>{row.gpa ?? "—"}</TableCell>
-              <TableCell>
-                <Badge variant={row.status === "scored" ? "success" : "secondary"}>
-                  {row.status}
-                </Badge>
-              </TableCell>
-            </TableRow>
+          <PileHeader>
+            <TriangleAlert className="size-3.5 text-warning" />
+            needs a human ({needsHuman.length}) · Δ ≥ {DIVERGENCE_THRESHOLD} or low confidence
+          </PileHeader>
+          {needsHuman.map((row, i) => (
+            <ApplicationRow key={row.id} row={row} onClick={() => setSelected(i)} />
           ))}
+
+          <TableRow
+            className="cursor-pointer hover:bg-muted/50"
+            onClick={() => setShowAgreed((v) => !v)}
+          >
+            <TableCell colSpan={8} className="py-2 text-xs font-medium text-muted-foreground">
+              <span className="flex items-center gap-1.5">
+                {showAgreed ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                agreed ({agreed.length}) — AI and human within {DIVERGENCE_THRESHOLD} points
+              </span>
+            </TableCell>
+          </TableRow>
+          {showAgreed &&
+            agreed.map((row, i) => (
+              <ApplicationRow key={row.id} row={row} onClick={() => setSelected(needsHuman.length + i)} />
+            ))}
         </TableBody>
       </Table>
+
+      <ApplicationReviewDialog
+        app={selected != null ? visible[selected] ?? null : null}
+        index={selected ?? 0}
+        total={visible.length}
+        onOpenChange={(open) => !open && setSelected(null)}
+        onPrev={() => setSelected((i) => (i == null ? i : (i - 1 + visible.length) % visible.length))}
+        onNext={() => setSelected((i) => (i == null ? i : (i + 1) % visible.length))}
+      />
     </>
+  );
+}
+
+function StatCard({ value, label }: { value: number | string; label: string }) {
+  return (
+    <Card size="sm" className="gap-1">
+      <CardContent>
+        <div className="font-mondwest text-3xl leading-none">{value}</div>
+        <div className="mt-1 text-xs text-muted-foreground">{label}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function PileHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <TableRow className="hover:bg-transparent">
+      <TableCell colSpan={8} className="py-2 text-xs font-medium text-muted-foreground">
+        <span className="flex items-center gap-1.5">{children}</span>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function ApplicationRow({ row, onClick }: { row: AppRow; onClick: () => void }) {
+  const split = Math.abs(row.delta) >= DIVERGENCE_THRESHOLD;
+  return (
+    <TableRow className="cursor-pointer" onClick={onClick}>
+      <TableCell className="font-medium">{row.student}</TableCell>
+      <TableCell>{row.scholarship}</TableCell>
+      <TableCell className="truncate text-muted-foreground">{row.major}</TableCell>
+      <TableCell>
+        {row.gpa == null ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <Badge variant="secondary">{row.gpa.toFixed(1)}</Badge>
+        )}
+      </TableCell>
+      <TableCell>
+        <div className="flex items-center gap-2" title={`${row.aiComposite} / ${row.aiCompositeMax}`}>
+          <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
+            <div className="h-full rounded-full bg-primary" style={{ width: `${row.aiPercent}%` }} />
+          </div>
+          <span className="tabular-nums text-xs text-muted-foreground">{row.aiPercent}%</span>
+        </div>
+      </TableCell>
+      <TableCell>
+        {row.lowCount > 0 ? (
+          <Badge variant="warning">
+            <TriangleAlert /> {row.lowCount} low
+          </Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground">solid</span>
+        )}
+      </TableCell>
+      <TableCell className="tabular-nums text-xs text-muted-foreground">{row.humanPercent}%</TableCell>
+      <TableCell>
+        {/* signed on purpose: +21 = AI warmer than the human, -24 = AI colder */}
+        <span className={cn("tabular-nums text-xs", split ? "font-medium text-warning" : "text-muted-foreground")}>
+          {row.delta > 0 ? "+" : ""}{row.delta}
+        </span>
+      </TableCell>
+    </TableRow>
   );
 }
