@@ -5,6 +5,8 @@ requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.48",
     "fastapi>=0.115",
+    "pdfplumber>=0.11.10",
     "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.32",
     "uvicorn[standard]>=0.34",
 ]

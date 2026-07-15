@@ -6,6 +6,7 @@ import boto3
 # point at their own tables without code changes
 APPLICATIONS_TABLE = os.environ.get("APPLICATIONS_TABLE", "sjsu-applications")
 SCORES_TABLE = os.environ.get("SCORES_TABLE", "sjsu-scores")
+RUBRICS_TABLE = os.environ.get("RUBRICS_TABLE", "sjsu-rubrics")
 
 _dynamo = None
 
@@ -25,3 +26,7 @@ def applications_table():
 
 def scores_table():
     return dynamo().Table(SCORES_TABLE)
+
+
+def rubrics_table():
+    return dynamo().Table(RUBRICS_TABLE)
