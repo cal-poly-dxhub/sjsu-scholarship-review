@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { LayoutDashboard, FileText, ScrollText, Settings } from "lucide-react";
 import {
   Tooltip,
@@ -10,16 +9,22 @@ import { Avatar, AvatarFallback } from "@/sjsu/components/ui/avatar";
 import { Button } from "@/sjsu/components/ui/button";
 
 // 52px icon rail, ported from the source app. auth/trpc stripped — the app has
-// no auth yet, so nav is local state and the avatar is a static initial.
+// no auth yet, so nav is lifted to App (no router) and the avatar is a static initial.
 const NAV_ITEMS = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "applications", label: "Applications", icon: FileText },
   { key: "rubrics", label: "Rubrics", icon: ScrollText },
 ];
 
-export function Sidebar({ onOpenSettings }: { onOpenSettings?: () => void }) {
-  const [active, setActive] = useState("applications");
-
+export function Sidebar({
+  active,
+  onNavigate,
+  onOpenSettings,
+}: {
+  active: string;
+  onNavigate: (key: string) => void;
+  onOpenSettings?: () => void;
+}) {
   return (
     <TooltipProvider delayDuration={0}>
       <aside className="flex w-[52px] flex-col items-center bg-background py-4">
@@ -43,7 +48,7 @@ export function Sidebar({ onOpenSettings }: { onOpenSettings?: () => void }) {
                   <Button
                     variant="ghost"
                     size="icon-lg"
-                    onClick={() => setActive(navItem.key)}
+                    onClick={() => onNavigate(navItem.key)}
                     className={
                       isActive
                         ? "bg-accent text-foreground"

@@ -9,7 +9,10 @@ import { FrameCross } from "@/sjsu/components/icons/frame-cross";
 const gutter =
   "pointer-events-none absolute inset-y-0 z-0 w-[max(0px,calc(50%-32rem))] overflow-hidden";
 
-export function FramedOutlet({ children }: { children: ReactNode }) {
+export function FramedOutlet({ children, bleed }: { children: ReactNode; bleed?: boolean }) {
+  // some pages (e.g. the rubric pdf split-view) need the full outlet width — skip
+  // the centered frame, gutters, and padding entirely.
+  if (bleed) return <div className="h-full w-full overflow-hidden">{children}</div>;
   return (
     <div className="relative h-full">
       <div className={`${gutter} left-0`}>
