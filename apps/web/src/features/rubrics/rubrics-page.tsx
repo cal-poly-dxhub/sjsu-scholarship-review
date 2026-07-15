@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Document, Page, pdfjs } from "react-pdf";
 // vite resolves the worker asset via ?url — the bare new URL() trick doesn't work here
 import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
-  UploadCloud,
   Cpu,
   CheckCircle2,
   AlertTriangle,
@@ -25,6 +25,10 @@ import {
   ResizablePanel,
   ResizableHandle,
 } from "@/sjsu/components/ui/resizable";
+import { ShimmeringText } from "@/sjsu/components/ui/shimmering-text";
+import IconFileExport from "@/sjsu/components/icons/icon-file-export";
+import { DocumentPdfIllustration } from "@/components/illustrations/document-pdf";
+import { CardDecorator } from "@/components/illustrations/document-analysis";
 
 // pdf.js worker — must be set in the same module that renders the pdf
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
@@ -69,6 +73,8 @@ const ROUTE = {
 
 export function RubricsPage() {
   const [draft, setDraft] = useState<Draft | null>(null);
+  // draft parked here while the scanner sweeps its remaining labels, committed after
+  const [pendingDraft, setPendingDraft] = useState<Draft | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [current, setCurrent] = useState(0); // which criterion is open
   const fileInput = useRef<HTMLInputElement>(null);
@@ -79,10 +85,7 @@ export function RubricsPage() {
       body.append("file", f);
       return api<Draft>("/rubrics/generate", { method: "POST", body });
     },
-    onSuccess: (d) => {
-      setDraft(d);
-      setCurrent(0);
-    },
+    onSuccess: (d) => setPendingDraft(d),
     onError: (e) => toast.error(`Couldn't read that PDF: ${e.message}`),
   });
 
@@ -175,46 +178,78 @@ export function RubricsPage() {
     );
   }
 
-  // upload state — no draft yet
+  // upload state — no draft yet. once a pdf lands the drop area disappears and
+  // the scanning illustration takes over until the draft comes back.
   if (!draft) {
     return (
       <div className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center p-8">
-        <input
-          ref={fileInput}
-          type="file"
-          accept="application/pdf"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) {
-              setFile(f);
-              generate.mutate(f);
-            }
-            e.target.value = "";
-          }}
-        />
-        <Card
-          className="w-full cursor-pointer rounded-3xl border-dashed transition-colors hover:border-foreground/40"
-          onClick={() => fileInput.current?.click()}
-        >
-          <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
-            {generate.isPending ? (
-              <>
-                <Spinner />
-                <p className="text-sm text-muted-foreground">Reading the rubric…</p>
-              </>
-            ) : (
-              <>
-                <UploadCloud className="h-8 w-8 text-muted-foreground" />
+        <AnimatePresence mode="wait">
+        {generate.isPending || pendingDraft ? (
+          <motion.div
+            key="scanning"
+            initial={{ opacity: 0, scale: 0.96 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98 }}
+            transition={{ type: "spring", bounce: 0, visualDuration: 0.35 }}
+          >
+            <ScanningState
+              isDone={pendingDraft != null}
+              onFinished={() => {
+                if (!pendingDraft) return;
+                setDraft(pendingDraft);
+                setCurrent(0);
+                setPendingDraft(null);
+              }}
+            />
+          </motion.div>
+        ) : (
+          <motion.div
+            key="upload"
+            className="w-full"
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.96 }}
+            transition={{ type: "spring", bounce: 0, visualDuration: 0.25 }}
+          >
+            <input
+              ref={fileInput}
+              type="file"
+              accept="application/pdf"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) {
+                  setFile(f);
+                  generate.mutate(f);
+                }
+                e.target.value = "";
+              }}
+            />
+            <Card
+              className="w-full cursor-pointer rounded-3xl border-dashed transition-colors hover:border-foreground/40"
+              onClick={() => fileInput.current?.click()}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const f = e.dataTransfer.files?.[0];
+                if (f && f.type === "application/pdf") {
+                  setFile(f);
+                  generate.mutate(f);
+                }
+              }}
+            >
+              <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
+                <IconFileExport className="h-8 w-8 text-muted-foreground" />
                 <p className="font-medium">Upload a rubric PDF</p>
                 <p className="text-sm text-muted-foreground">
                   The system generates a draft questionnaire from the document. You
                   review, edit, and approve every criterion before anything is saved.
                 </p>
-              </>
-            )}
-          </CardContent>
-        </Card>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+        </AnimatePresence>
       </div>
     );
   }
@@ -431,6 +466,76 @@ export function RubricsPage() {
   );
 }
 
+// the real stages of /rubrics/generate, paced to roughly match the backend:
+// extract text -> model drafts the questionnaire (the long one) -> verbatim check -> locate options.
+// one request, no progress events — so the labels advance on timers and hold on the last one.
+const SCAN_STAGES = [
+  { label: "Extracting text from the PDF", ms: 2500 },
+  { label: "Reading the rubric's criteria", ms: 3500 },
+  { label: "Drafting the questionnaire", ms: 4500 },
+  { label: "Copying every option word for word", ms: 4500 },
+  { label: "Scoring ranges and level bands", ms: 4000 },
+  { label: "Checking every option is verbatim", ms: 2500 },
+  { label: "Locating each option on the page", ms: 0 },
+];
+
+// tailark document-pdf inside the document-analysis scan frame, stage text shimmering under it
+function ScanningState({ isDone, onFinished }: { isDone: boolean; onFinished: () => void }) {
+  const [stage, setStage] = useState(0);
+  const stageRef = useRef(stage);
+  stageRef.current = stage;
+
+  useEffect(() => {
+    if (isDone || stage >= SCAN_STAGES.length - 1) return;
+    const t = setTimeout(() => setStage((s) => s + 1), SCAN_STAGES[stage]!.ms);
+    return () => clearTimeout(t);
+  }, [stage, isDone]);
+
+  // request resolved: accelerating sweep through whatever labels are left so it
+  // never cuts off mid-label — each one shorter than the last, final one holds
+  useEffect(() => {
+    if (!isDone) return;
+    const timers: number[] = [];
+    const last = SCAN_STAGES.length - 1;
+    let t = 0;
+    let dur = 300;
+    for (let s = stageRef.current + 1; s <= last; s++) {
+      timers.push(window.setTimeout(() => setStage(s), t));
+      t += s === last ? 500 : dur;
+      dur = Math.max(120, dur * 0.7);
+    }
+    if (stageRef.current === last) t = 500;
+    timers.push(window.setTimeout(onFinished, t));
+    return () => timers.forEach(clearTimeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDone]);
+
+  return (
+    <div className="flex flex-col items-center gap-6">
+      <div className="bg-foreground/3 relative isolate rounded border p-10">
+        <CardDecorator className="opacity-50" />
+        <div className="animate-scan absolute inset-x-4 inset-y-6 z-10 mix-blend-color">
+          {/* sjsu logo blue (#0074ba from assets/sjsu-logo.svg) */}
+          <div className="bg-linear-to-b via-[#0074ba] h-8.5 absolute -inset-x-[9px] m-auto -translate-y-1/2 rounded-md from-transparent to-transparent" />
+        </div>
+        <div className="animate-scan absolute inset-x-4 inset-y-6 z-10">
+          <div className="bg-foreground absolute -inset-x-4 m-auto h-px rounded-full" />
+          <div className="bg-linear-to-r to-sky-300 absolute -inset-x-4 m-auto h-px rounded-full from-[#0074ba] blur" />
+        </div>
+        <DocumentPdfIllustration />
+      </div>
+      {/* sjsu theme vars are bare hsl triples — wrap them or the gradient is invalid */}
+      <ShimmeringText
+        key={stage}
+        text={SCAN_STAGES[stage]!.label}
+        className="text-sm"
+        color="hsl(var(--muted-foreground))"
+        shimmerColor="hsl(var(--foreground))"
+      />
+    </div>
+  );
+}
+
 // one editable score row: the colored number band + the verbatim label, shared by
 // flat options and the per-level variant tables. color matches its pdf highlight.
 function OptionRow({
@@ -445,10 +550,15 @@ function OptionRow({
   return (
     <div className="flex items-start gap-2">
       {/* score band — system-owned, read-only Badge; color matches its pdf highlight */}
+      {/* filled-badge recipe by hand: color is dynamic so the variant tokens can't supply it */}
       <Badge
         variant="outline"
-        className="mt-1 min-w-8 shrink-0 justify-center font-semibold"
-        style={{ borderColor: color, backgroundColor: color, color: "#0f1115" }}
+        className="mt-1 min-w-8 shrink-0 justify-center font-semibold shadow-[inset_0_0_0_1px_rgba(255,255,255,0.18)]"
+        style={{
+          borderColor: `color-mix(in oklab, ${color} 75%, black)`,
+          backgroundColor: color,
+          color: "#0f1115",
+        }}
       >
         {option.score_max != null ? `${option.score}–${option.score_max}` : option.score}
       </Badge>
@@ -508,12 +618,13 @@ function PdfPane({
             h.rects.map((r, i) => (
               <div
                 key={`${hi}-${i}`}
-                className="pointer-events-none absolute rounded-sm"
+                className="pointer-events-none absolute"
                 style={{
+                  // +2px bottom in screen px (post-scale) so the stroke reads the same at any zoom
                   left: r[0] * scale,
                   top: r[1] * scale,
                   width: (r[2] - r[0]) * scale,
-                  height: (r[3] - r[1]) * scale,
+                  height: (r[3] - r[1]) * scale + 2,
                   // marker highlighter: full neon, multiply so text shows through, no border
                   backgroundColor: h.color,
                   mixBlendMode: "multiply",
