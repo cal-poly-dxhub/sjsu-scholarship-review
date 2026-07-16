@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 from db import rubrics_table
+from routes.applications import router as applications_router
 from routes.scores import router as scores_router
 from rubric_generator import generate_from_pdf
 
@@ -23,6 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(applications_router)
 app.include_router(scores_router)
 
 
