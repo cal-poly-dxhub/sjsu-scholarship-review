@@ -8,8 +8,8 @@ import {
 import { Avatar, AvatarFallback } from "@/sjsu/components/ui/avatar";
 import { Button } from "@/sjsu/components/ui/button";
 
-// 52px icon rail, ported from the source app. auth/trpc stripped — the app has
-// no auth yet, so nav is lifted to App (no router) and the avatar is a static initial.
+// 52px icon rail. no auth yet, so nav is lifted to App (no router) and the
+// avatar is a static initial.
 const NAV_ITEMS = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "applications", label: "Applications", icon: FileText },
