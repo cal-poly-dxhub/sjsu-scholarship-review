@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 from db import rubrics_table
+from routes.scores import router as scores_router
 from rubric_generator import generate_from_pdf
 
 app = FastAPI(title="sjsu-api")
@@ -21,6 +22,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(scores_router)
 
 
 @app.get("/health")
@@ -61,6 +64,3 @@ def rubrics_save(questionnaire: dict):
 @app.get("/rubrics")
 def rubrics_list():
     return {"rubrics": rubrics_table().scan().get("Items", [])}
-
-
-# TODO: applications list, scores by application, comparison (ai vs human)
