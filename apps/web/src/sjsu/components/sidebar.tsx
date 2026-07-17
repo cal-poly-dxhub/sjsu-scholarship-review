@@ -1,4 +1,4 @@
-import { LayoutDashboard, FileText, ScrollText, Settings } from "lucide-react";
+import { LayoutDashboard, GraduationCap, ClipboardCheck, Settings } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -11,9 +11,9 @@ import { Button } from "@/sjsu/components/ui/button";
 // 52px icon rail, ported from the source app. auth/trpc stripped — the app has
 // no auth yet, so nav is lifted to App (no router) and the avatar is a static initial.
 const NAV_ITEMS = [
-  { key: "overview", label: "Overview", icon: LayoutDashboard },
-  { key: "applications", label: "Applications", icon: FileText },
-  { key: "rubrics", label: "Rubrics", icon: ScrollText },
+  { key: "overview", label: "Dashboard", icon: LayoutDashboard },
+  { key: "scholarships", label: "Scholarships", icon: GraduationCap },
+  { key: "reviews", label: "Reviews", icon: ClipboardCheck },
 ];
 
 export function Sidebar({
@@ -27,12 +27,12 @@ export function Sidebar({
 }) {
   return (
     <TooltipProvider delayDuration={0}>
-      <aside className="flex w-[52px] flex-col items-center bg-background py-4">
+      <aside className="flex w-[52px] flex-col items-center py-4" style={{ backgroundColor: 'var(--sjsu-blue)' }}>
         <Tooltip>
           <TooltipTrigger asChild>
             <span aria-label="Profile">
               <Avatar size="sm">
-                <AvatarFallback>S</AvatarFallback>
+                <AvatarFallback className="bg-white/20 text-white text-xs font-bold">SJ</AvatarFallback>
               </Avatar>
             </span>
           </TooltipTrigger>
@@ -51,8 +51,8 @@ export function Sidebar({
                     onClick={() => onNavigate(navItem.key)}
                     className={
                       isActive
-                        ? "bg-accent text-foreground"
-                        : "text-muted-foreground"
+                        ? "bg-white/20 text-white"
+                        : "text-white/60 hover:text-white hover:bg-white/10"
                     }
                   >
                     <navItem.icon className="h-4 w-4" />
@@ -71,7 +71,7 @@ export function Sidebar({
               size="icon-lg"
               onClick={onOpenSettings}
               aria-label="Settings"
-              className="text-muted-foreground"
+              className="text-white/60 hover:text-white hover:bg-white/10"
             >
               <Settings className="h-4 w-4" />
             </Button>

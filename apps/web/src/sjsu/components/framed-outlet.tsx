@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { AsciiDots } from "@/sjsu/components/ascii-dots";
 import { FrameCross } from "@/sjsu/components/icons/frame-cross";
 
 // marketing "framed page" look, moved inside the outlet. a centered column
@@ -15,13 +14,6 @@ export function FramedOutlet({ children, bleed }: { children: ReactNode; bleed?:
   if (bleed) return <div className="h-full w-full overflow-hidden">{children}</div>;
   return (
     <div className="relative h-full">
-      <div className={`${gutter} left-0`}>
-        <AsciiDots textColor="23, 121, 186" className="block size-full" />
-      </div>
-      <div className={`${gutter} right-0`}>
-        <AsciiDots textColor="23, 121, 186" className="block size-full" />
-      </div>
-
       {/* frame + crosses stay pinned; only the inner div scrolls */}
       <div className="relative z-[1] mx-auto flex h-full w-full max-w-5xl flex-col border-x bg-background">
         <FrameCross className="-left-[11px] -top-[11px]" />
