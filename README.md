@@ -1,27 +1,27 @@
 # SJSU Scholarship Application Review
 
-Monorepo. AI does a first-pass rubric score of scholarship applications, a human
-makes the final call. Runs in shadow mode next to human review, then we compare.
+AI does a first-pass rubric score of scholarship applications, a human makes the
+final call. Runs in shadow mode next to human review, then we compare.
+
+## Project structure
 
 ```
 apps/
+  api/      FastAPI backend (rubric generation, DynamoDB persistence)
   web/      React + Vite dashboard
-  api/      tRPC server
-packages/
-  shared/   types shared by web + api (empty until we lock them)
-infra/      deployment (deferred, see infra/README.md)
-materials/  s3 data mirror (gitignored)
+docs/       architecture & design docs
+infra/      deployment plan (deferred)
 ```
 
-## Run it
+## Quick start
 
-```
+```bash
 pnpm install
-pnpm dev      # web on :3000, api on :3005
+cd apps/api && cp .env.example .env   # fill in AWS creds
+cd ../..
+pnpm dev                              # web on :5173, api on :3005
 ```
 
 ## Stack
 
-React 18 · Vite 6 · Tailwind 4 · tRPC v11. No auth.
-
-DB, Bedrock scoring, and the grading method are not built yet, by design.
+React 18 · Vite 6 · Tailwind 4 · FastAPI · DynamoDB · AWS Bedrock. No auth.
