@@ -1,0 +1,92 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./hack/spec_metadata.sh)",
+      "Bash(hack/spec_metadata.sh)",
+      "Bash(bash hack/spec_metadata.sh)",
+      "WebSearch",
+      "WebFetch",
+      "mcp__plugin_deploy-on-aws_awsknowledge__aws___search_documentation",
+      "mcp__plugin_deploy-on-aws_awsknowledge__aws___read_documentation"
+    ],
+    "ask": [
+      "Bash(rm *)",
+      "Bash(rmdir *)",
+      "Bash(unlink *)",
+      "Bash(shred *)",
+      "Bash(del *)",
+      "Bash(erase *)",
+      "Bash(find * -delete *)",
+      "Bash(find * -exec rm *)",
+      "Bash(Remove-Item *)",
+      "Bash(aws * delete*)",
+      "Bash(aws * remove*)",
+      "Bash(aws * terminate*)",
+      "Bash(aws * deregister*)",
+      "Bash(aws s3 rm *)",
+      "Bash(aws s3 rb *)",
+      "Bash(gcloud * delete*)",
+      "Bash(az * delete*)",
+      "Bash(kubectl delete *)",
+      "Bash(terraform destroy*)",
+      "Bash(docker rm *)",
+      "Bash(docker rmi *)",
+      "Bash(docker * prune*)",
+      "Bash(gh * delete*)",
+      "Bash(pip install*)",
+      "Bash(pip3 install*)",
+      "Bash(pip download*)",
+      "Bash(pip3 download*)",
+      "Bash(python -m pip install*)",
+      "Bash(python -m pip download*)",
+      "Bash(python3 -m pip install*)",
+      "Bash(pipx *)",
+      "Bash(easy_install *)",
+      "Bash(conda install*)",
+      "Bash(conda create*)",
+      "Bash(poetry add*)",
+      "Bash(poetry install*)",
+      "Bash(uv pip install*)",
+      "Bash(uv add*)",
+      "Bash(npm install*)",
+      "Bash(npm i *)",
+      "Bash(npm add*)",
+      "Bash(npm ci*)",
+      "Bash(yarn add*)",
+      "Bash(yarn install*)",
+      "Bash(pnpm add*)",
+      "Bash(pnpm install*)",
+      "Bash(gem install*)",
+      "Bash(cargo install*)",
+      "Bash(go get*)",
+      "Bash(go install*)",
+      "Bash(apt install*)",
+      "Bash(apt-get install*)",
+      "Bash(yum install*)",
+      "Bash(dnf install*)",
+      "Bash(brew install*)",
+      "Bash(choco install*)",
+      "Bash(winget install*)",
+      "Bash(scoop install*)"
+    ],
+    "defaultMode": "auto"
+  },
+  "skipAutoPermissionPrompt": true,
+  "autoMode": {
+    "soft_deny": [
+      "$defaults",
+      "Deleting anything, whether local files/directories or cloud resources (e.g. rm, rmdir, shred, find -delete, aws/gcloud/az delete, s3 rm/rb, terraform destroy, docker rm/prune, kubectl delete). Always require explicit user confirmation before deleting.",
+      "Installing or downloading packages from any package manager (e.g. pip/pip3, python -m pip, conda, poetry, uv, npm/yarn/pnpm, npx, gem, cargo, go get/install, apt/brew/choco/winget). Always require explicit user confirmation before installing.",
+      "Uploading anything to git or other version control.",
+      "Operations on the cloud that cost a $1.00 or more needs to be confirmed by the user."
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "awslabs.aws-documentation-mcp-server",
+    "playwright"
+  ],
+  "enabledPlugins": {
+    "deploy-on-aws@claude-plugins-official": true
+  }
+}

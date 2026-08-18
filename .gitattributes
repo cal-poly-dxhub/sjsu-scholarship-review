@@ -1,0 +1,13 @@
+# Store text files with LF in the repo, whatever the checkout platform does.
+* text=auto eol=lf
+
+# Keep spec artifacts out of pull request line counts — collapses them in diffs too.
+openspec/**/*.md linguist-generated
+
+# Binaries git shouldn't touch.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+*.imscc binary
+*.mp4 binary

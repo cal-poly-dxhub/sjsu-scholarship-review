@@ -1,13 +1,5 @@
 # CLAUDE.md
 
-How to work in this repo.
-
-The **frontend stays as it is** — the existing Next.js dashboard/report UI carries
-forward, so treat its screens as the contract the backend has to satisfy. The
-**backend is a greenfield rewrite, deployed on AWS with CDK**. Nothing on the
-backend side is a patch to existing behavior; write it as new construction against
-the spec, and use `aws-docs-researcher` rather than recalling AWS details.
-
 ## AWS access
 
 Anything that touches AWS runs against the `dxhub-automation` profile. Log in with
