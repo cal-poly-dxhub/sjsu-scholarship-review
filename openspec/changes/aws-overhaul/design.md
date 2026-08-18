@@ -1,0 +1,549 @@
+## Context
+
+See `proposal.md` — Why. The constraints that shape the design, and nothing else:
+
+- **Nothing survives in the account.** The `sjsu-*` tables and the export bucket were
+  destroyed, so CDK creates every store. There is no import step, no migration, and no
+  window where old and new both exist.
+- **`apps/api` is a FastAPI app on `uvicorn`.** It is not deployed and will not be. Phase 2
+  replaces it with Lambda handlers on boto3; phase 1 builds the front door in front of
+  nothing.
+- **The web app is Vite + React 18 + Tailwind 4 + shadcn/ui**, not Next.js — `CLAUDE.md`
+  says Next.js and is wrong about this. There is no router: `App.tsx` switches on a
+  `useState` view key against `NAV_ITEMS` in `sidebar.tsx`. That matters for the deep-link
+  requirement, which is a CloudFront viewer-request rewrite, not a routing change.
+- **Two UI generations are in the tree.** `features/scholarships/` hand-rolls its inputs,
+  buttons, and table with hard-coded colours. `features/applications/` and `sjsu/` use the
+  component library and semantic tokens. Phase 4 takes behaviour from the first and markup
+  from the second.
+- **Two Lambdas exist as samples** in `lambdas/`, on branches rather than `main`. They show
+  a working shape. The defect list in `proposal.md` is what must not be copied.
+- **The rubric weights and the rubric text have one home**: the `criteria` list on the rubric
+  item, which `rubric.md` seeds. Two weight copies are still in the tree
+  (`apps/api/main.py:REVIEW_WEIGHTS` and the evaluation harness) and both go when their code
+  goes. `rubric.md` itself has no weights in it — only maxima and level descriptions.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- One CDK app that defines everything, deployable from nothing to a working environment.
+- One hostname per environment, so there is no CORS anywhere in the system.
+- Scoring that cannot run without someone asking, cannot double-score an application, and
+  cannot turn a truncated model reply into a real score.
+- Screens that read the pipeline honestly: part-scored looks part-scored, unreviewed says
+  unreviewed, and a missing input says it is missing.
+
+**Non-Goals — design-level, beyond the proposal's scope list:**
+
+- **No abstraction over AWS.** Handlers call boto3 directly. No repository layer, no
+  service registry, no dependency-injection container.
+- **No shared runtime package between web and infra.** The CDK app and the web app agree
+  on names through build-time config, not a generated client.
+- **No local emulator.** Running a handler locally means calling it with a test event.
+  No LocalStack, no DynamoDB Local, no SAM local.
+- **One index, no index tuning.** `pk` and `sk` are pinned, and the ranking index is the
+  only secondary index. Anything else waits until a cohort proves it needs more.
+
+## Decisions
+
+### One CDK app, stacks split by lifecycle
+
+```mermaid
+flowchart TB
+    subgraph data["DataStack — outlives the others"]
+        table[(DynamoDB<br/>dev-scholarship)]
+        bucket[(S3<br/>dev bucket<br/>uploads · batch · analytics)]
+    end
+
+    subgraph edge["EdgeStack — the front door"]
+        pool[Cognito user pool<br/>+ hosted UI domain<br/>+ web app client]
+        site[(S3<br/>web build)]
+        cf[CloudFront]
+        api[API Gateway HTTP API<br/>JWT authorizer]
+    end
+
+    subgraph compute["ComputeStack — phase 2 and 3"]
+        routes[Route handlers]
+        ondemand[Scoring worker]
+        batchw[Batch scoring worker]
+        ingestw[Ingest worker]
+    end
+
+    cf -->|default| site
+    cf -->|/api/*| api
+    api --> routes
+    pool -.->|verifies| api
+    cf -.->|its domain is the callback| pool
+    routes --> table
+    routes --> bucket
+    ingestw --> table
+    ondemand --> table
+    batchw --> table
+    batchw --> bucket
+```
+
+Three stacks, split by how long the thing inside lives, not by phase. The data stores
+outlive every redeploy and carry `RETAIN`; the front door and the compute are replaceable.
+Phase 1 adds nothing to `ComputeStack` — it synthesises empty — while phases 2 and 3 both
+fill it. A phase is a unit of work, not a unit of deployment.
+
+**The user pool is in `EdgeStack`, because sign-in and the front door are the same
+deployment.** The app client's callback URL is the CloudFront domain, and the JWT authorizer
+needs the client — so the two point at each other. In one stack CloudFormation orders that
+itself. Split across two, one of them has to go up before the other's name exists, which
+makes signing in a two-pass deploy: the pool up with a placeholder callback, the
+distribution, then the pool again with the real domain. That is a step someone forgets once
+and then cannot sign in.
+
+Nothing is risked by putting it there. The pool carries `RETAIN`, so a `cdk destroy` of
+`EdgeStack` leaves the hand-created accounts alone — the same protection a separate stack
+would have given it.
+
+*Alternative — one stack.* Simpler, and wrong here for one reason: a bad `cdk destroy`
+would take the applicant data with it. The split is a blast-radius decision.
+
+*Alternative — a stack per phase.* Would leave the table in "phase 1" forever and make
+every later phase read a cross-stack export to find it. Lifecycle is the more stable line.
+
+### The API is same-origin under `/api/`, not its own domain
+
+CloudFront has two behaviours: the default serves the web build from a private S3 bucket
+through origin access control, and `/api/*` forwards to the API Gateway. `Authorization`
+is forwarded; nothing under `/api/` is cached.
+
+This removes CORS from the system rather than configuring it. There are no preflights, no
+allow-list to keep in sync with a new environment, and the web app calls relative paths so
+it needs no API base URL at build time.
+
+*Alternative — a separate API domain with CORS.* One more certificate, one more DNS name,
+and a preflight on every non-GET. Nothing gained for an internal app.
+
+### Deep links are rewritten at the viewer, not mapped from an S3 error
+
+There is no router: a request for `/reviews/<key>` is not an object in the bucket. So the
+app shell has to be served for it. A CloudFront Function on the default behaviour's viewer
+request rewrites a URI whose last segment has no `.` in it to `/index.html`. Hashed assets
+have their own `/assets/*` behaviour and never reach the function.
+
+*Alternative — map 403 and 404 to `/index.html` with a 200.* The obvious way, and it breaks
+the spec's "missing asset still errors" scenario. Custom error responses are
+distribution-wide, and with origin access control S3 answers 403 for **any** key it cannot
+serve — so a deep link and a stale `/assets/main-a1b2c3.js` reference look identical at that
+layer. Mapping them both would turn a missing script into an HTML 200: a blank page with
+nothing in the console to say why. Rejected.
+
+The cost of the rewrite is one edge case: an in-app route whose last segment contains a dot
+gets the real 403 instead of the shell. Application keys are UUIDs, so nothing today hits it.
+
+### Cognito hosted UI with the authorization-code flow and PKCE — and no auth library
+
+Cognito does authentication end to end: the login page, password policy, reset, lockout,
+MFA, and token issuing. API Gateway's JWT authorizer does verification, at the edge,
+before any handler runs. What is left for the browser is four steps — redirect to
+`/oauth2/authorize` with a PKCE challenge, swap the code at `/oauth2/token`, hold the
+tokens, refresh before expiry. That is one file of plain `fetch`.
+
+*Alternative — `aws-amplify`.* A large dependency for four steps we would still have to
+understand. Rejected.
+
+*Alternative — Authorization@Edge (Lambda@Edge).* Would move the redirect out of the app,
+at the cost of: us-east-1 only, no environment variables, replication on every deploy, and
+the code is still ours to write. Rejected.
+
+*Implicit flow* is not considered — it puts tokens in the URL.
+
+### Access is all or nothing, and an admin in the user pool is what grants it
+
+There is one level of access: you have an account or you do not. An admin creates it in the
+user pool, and that account can reach every route and every screen. No groups, no scopes
+beyond `openid`, `email`, and `profile`, and no role claim anyone reads — the JWT authorizer
+checks that a token came from this pool and this app client, and nothing behind it asks who
+the caller is.
+
+That is enough because everyone with an account is a scholarship reviewer on the same
+committee, and because there is nothing yet for a role to gate: sign-off is
+`human-in-the-loop` and not built, and the triggers on the dashboard are for whoever is
+running the cohort. A role model with one role in it is a thing to maintain, not a control.
+
+Adding one later is a Cognito group and a claim check, not a rearrangement — which is the
+reason to wait rather than guess at the roles now.
+
+### One table, prefixes instead of table names
+
+The layout is in the spec's data model section. The reasoning for it:
+
+- **A cohort is one Query.** Applications live in their cohort's partition, so the ranked
+  list, the progress counts, and the export all come from a single call.
+- **Reasoning text never rides along.** Scores live in a partition per application, so
+  reading 4,887 applications does not pull 4,887 blocks of essay reasoning with them.
+- **Every attempt is kept.** A score's sort key is the time it was written, so a rescore
+  appends instead of overwriting.
+- **The environment is the only thing that gets its own table**, because that is the
+  boundary where a mistake matters: a wrong table name fails loudly, a wrong key prefix
+  would be a silent read of production.
+
+Two traps worth naming here, because both are silent:
+
+- **`qa_pairs` is most of an application's bytes.** Any cohort-wide read — the ranked list,
+  the progress counts, the export — uses a `ProjectionExpression` that leaves it out.
+  Whole maps project fine; individual map elements cannot, so `category_scores` comes back
+  entire or not at all.
+- **`status` and `year` are reserved words.** Every expression touching them needs
+  `ExpressionAttributeNames`. This is the kind of thing that works in testing and fails on
+  the one query nobody ran.
+
+*Alternative — three tables, as the old code had.* Three names, three policies, and a read
+across tables to rank a cohort. No benefit at this size.
+
+### Per-criterion scores are the source of truth; the total is derived and stamped
+
+The worker stores each criterion's score, then computes the total from the weights on the
+rubric item and stores it with the `rubric_version` that produced it.
+
+That stamp is what makes two later operations different things:
+
+| A rubric version changes | What runs | Why |
+| --- | --- | --- |
+| weights only | recompute | arithmetic over scores already stored — no model call |
+| any criterion's id, name, max, or level text | rescore | arithmetic cannot produce scores for criteria that did not exist |
+
+Without the stamp, a ranked list can silently mix totals made from two sets of weights,
+which reads as a leaderboard and is not one.
+
+The sample Lambda got this wrong twice over: it asked the *model* for a total, validated
+it, threw it away, then computed a second total from a copy of the weights kept in the
+Lambda. Both are stripped. The model is not asked for a total at all.
+
+### Claim before score, with an expiry
+
+A worker conditionally writes `claimed_by` and `claimed_until` on an application whose
+`status` is not `processing`, and only scores what the write succeeded on. The claim
+expires, so a worker that dies mid-run releases its work instead of parking it forever.
+
+`claimed_by` holds a run id on the on-demand path and the Bedrock batch job identifier on
+the batch path. That is why a run needs no record of its own: polling a submitted batch job
+is a read of any claimed item in the cohort.
+
+*Alternative — SQS with a visibility timeout.* The right tool if work arrived
+continuously. It does not: work arrives when a person presses a button, and the queue would
+be a second place to look for the state the items already carry.
+
+### 500 applications is the line between the two workers
+
+Below 500, the on-demand worker: seconds to finish, full token price. At 500 or more, a
+Bedrock batch job: hours to finish, cheaper tokens, no rate-limit pressure. A person can
+override the choice.
+
+The number is a judgement about who is waiting, not a measured throughput limit. Below it
+the person who pressed the button is still at the screen; above it they were never going to
+wait anyway, so the cheaper tokens win.
+
+**There is a floor under the batch path, and 500 clears it.** A batch job has a minimum
+number of records, set per model as a service quota; AWS's examples put it at 100. So the
+automatic choice can never hit the floor — anything routed to batch is at least 500. Only a
+manual override can, which is why the override is allowed to be refused rather than
+silently downgraded: someone who asked for batch on 40 applications should be told why they
+cannot have it.
+
+**Batch inference does not support tool calling or structured output**, so the batch worker
+asks for JSON in the prompt instead of forcing a tool call. It *can* take `Converse`-format
+input (`modelInvocationType`), which is what lets both workers share one prompt builder and
+one reply check rather than maintaining two shapes that drift apart.
+
+### No prompt caching, on either path
+
+The static part of the prompt — `rubric.md` plus the schema block — is 3,936 characters,
+about 1,000 tokens. The minimum cacheable prefix is **4,096 tokens on every current Claude
+model**; the 1,024 figure in Bedrock's table belongs to older ones like Claude 3.7 Sonnet.
+A quarter of the minimum is not a near miss, so caching is dropped rather than deferred.
+
+The measurement is an estimate from character count — `ANTHROPIC_API_KEY` is not set here,
+so the token-counting endpoint was not called. It does not need to be: at 3.6 characters per
+token the prompt is ~1,093 tokens and at 4.0 it is ~984, and even an implausible 2.0 would
+land at ~1,968. Every reading is well under 4,096.
+
+What is kept is the discipline, not the feature: the static part stays byte-identical
+between calls, with nothing per-item inside it. That costs nothing and is what a cache would
+need if the prefix ever grows — the questionnaire approach in `docs/architecture.md` would
+get past 4,096, a 4 KB rubric will not.
+
+*Why this matters more than a dropped optimisation.* An undersized cache checkpoint does not
+fail. The call succeeds and the prefix simply is not cached, so a cache built on this prompt
+would look like it worked and save nothing. The spec therefore requires that no cache is
+claimed and that run logs report no saving, which turns a plausible-looking number into a
+spec violation.
+
+### The reply check fails closed
+
+The sample's `extract_json` had a last-resort branch that regexed out whatever criteria it
+could find and returned them tagged `"JSON repaired - partial parse"`; `validate` accepted
+that, and a truncated reply became a low score. The check here requires every criterion the
+rubric names, matching ids, and each score inside its criterion's maximum. Anything else is
+a failure, not a partial result.
+
+A failed rescore must not leave the previous score visible. The sample dropped `None`
+fields on write, so an application could read `score_failed` and still show a score. Here a
+failure clears the derived fields it invalidates.
+
+Retries feed the error back into the next attempt. Three identical calls at
+`temperature: 0` cost three times as much and return the same reply.
+
+### Phase 4: the dashboard is a trigger section, and the rest is left alone
+
+For this phase the dashboard is one thing: the trigger section — upload, the four triggers,
+and progress. That is what gets built. The reliability sections already on the screen — the
+human-versus-human against AI-versus-human comparison, the reviewer distribution, and the
+per-criterion and per-scholarship breakdowns — are kept where they are, below it, and are not
+rebuilt. They are a different feature waiting on last year's reader scores, which IT has not
+delivered.
+
+| Half | Depends on | Scope | This phase |
+| --- | --- | --- | --- |
+| Trigger section | the cohort Query only | one scholarship and year | built |
+| Reliability analysis | last year's reader scores | every scholarship | kept as it is, says waiting on data |
+
+Two things follow from that split, and both are the reason it is a split rather than one
+screen. Each half fetches on its own: the reliability query failing must not blank the
+triggers, which means they cannot share a loading gate — the current screen returns early on
+`statsLoading || analyticsLoading` for the whole page, and that early return is what has to
+go. And they cannot share a cohort picker, because the trigger section is about one cohort
+while a per-scholarship breakdown is about all of them.
+
+Where a reliability section has nothing, it says so rather than rendering a zero, a percentage
+of nothing, or an empty chart — any of which reads as a result.
+
+*Alternative — rebuild the reliability sections on the component library at the same time.*
+Rejected for now: it is markup work on a feature with no data behind it, and it would put the
+half that cannot be finished on the critical path of the half that can.
+
+*Alternative — comment the reliability sections out until the data arrives.* Rejected: the
+user asked for the code kept, and a commented-out screen rots faster than a rendered one
+saying "waiting on data".
+
+### Phase 4: the search is the existing filter panel, extended
+
+`features/scholarships/applications-list.tsx` already fetches a cohort, holds a ten-field
+filter state, filters in a `useMemo`, and renders numbered ranked rows. That is the search.
+It is carried forward, not replaced.
+
+Two things change underneath it:
+
+- **The data.** It keys on `availability_id` — the raw scholarship label from the sheet —
+  and reads `human_weighted_total`, `llm_weighted_score`, `final_weighted_score`,
+  `variance_pct`, and `needs_human_review`. The cohort id becomes scholarship plus year,
+  and of those five score fields only a stored `total_score` survives. Any filter left
+  pointing at a field that no longer exists is dropped or repointed — a filter matching
+  against nothing is worse than no filter.
+- **The markup.** Rebuilt on the component library: `Table` with `SortableHead` and
+  `useTableSort` for the ranked list, `TableEmptyOverlay` for the four states, semantic
+  tokens instead of `amber-100` and `red-600`.
+
+`useTableSort` already cycles descending, ascending, then off, which is exactly "highest,
+lowest, or unsorted". It stays as the control; what changes is what it drives — the direction
+of the index read, rather than an in-memory sort.
+
+### DynamoDB does the ranking — one index, no sorting anywhere else
+
+The ranked list is a Query on one secondary index: partition key
+`RANK#<scholarship>#<year>#<rubric_version>`, sort key `total_score`. A Query comes back in
+sort-key order, so "highest" and "lowest" are the read direction and nothing sorts a cohort —
+not the handler, not the browser. No score item is opened to order the list.
+
+Putting the rubric version in the partition key does two jobs with one key. Totals made from
+different weights are in different partitions, so a ranked read cannot mix them; and the
+worker writing `rank_pk` alongside a total is what puts an application into the index at all.
+Unscored and failed applications never get the attribute, so the index is sparse and they are
+absent from it by construction rather than by a filter someone has to remember. Their counts
+come from the cohort Query, which the progress display already makes.
+
+*Alternative — sort the projected cohort in the handler or the browser.* Works at 4,887 and
+needs no index, but it makes every ranked view read the whole cohort, and holding two rubric
+versions apart becomes a filter in application code — the kind that is correct until someone
+adds a code path that forgets it. The index makes it a key.
+
+Applications that are unscored, failed, or stamped with a rubric version that is not the
+cohort's are held out of the ranking and reported as counts. Ranking them as zero would put
+them at the bottom of a list that reads as an ordering of merit.
+
+### Reasoning in an export is a checkbox, defaulting to off
+
+Per-criterion scores sit on the application item. Reasoning and evidence sit on the score
+item. The checkbox is what decides whether the export crosses that line:
+
+| Export | Carries | Cost |
+| --- | --- | --- |
+| Cohort, box unchecked | scores and maxima, total, rubric version, state | client-side off the Query it already made. ~1 MB for 5,000 |
+| Cohort, box checked | the same, plus every criterion's reasoning and evidence | one score-item read per application. ~8 MB for 5,000 |
+| One open application | always the full text | free — the detail screen read that score item to render |
+
+**Default off, because the two differ by more than a field.** Unchecked is a download button.
+Checked is 4,887 reads. Making that the default would put the expensive path behind the
+obvious click.
+
+**The reads are `BatchGetItem` on exact keys, not a scan or a Query per application.** The
+application item carries `latest_scored_at`, which *is* the sort key of its newest score item
+(`SCORE#<latest_scored_at>`). So both key parts are known from the cohort read that already
+happened — a hundred keys per request, about fifty requests for a full cohort. Slow enough to
+show progress against, cheap enough not to need a job, a queue, or an S3 object.
+
+*Alternative — a Query per application.* 4,887 round trips instead of 50, for the same data.
+The only reason to prefer it would be wanting every historical attempt rather than the newest,
+which no export asks for.
+
+*Alternative — put the reasoning on the application item too, so one Query covers it.* That
+is what the data model exists to avoid: it would drag every criterion's reasoning into every
+cohort read, ranking and progress counts included, to serve an export nobody runs most days.
+
+**A missing score item does not fail the export.** That application stays in the file with its
+scores and its reasoning marked as not read. An export that dies at applicant 3,000 because
+one score item is gone is worse than one that says which entries are incomplete.
+
+No export is a dump of the raw items: no claim holder or expiry, no attempt count, no content
+hash, no raw keys, no DynamoDB type wrappers — none of it means anything outside the pipeline.
+Unscored and failed applications are in the file with their state, so an export cannot quietly
+drop an applicant, and every export repeats the screen's warnings.
+
+### Search matches the stored fields, not the essays
+
+Search covers the applicant identifier, program, level, major, and GPA. It does not read
+essay text.
+
+Reaching into the essays would mean one of two things. Filtering in the browser needs the
+essay text on every cohort load — and `qa_pairs` is the bulk of each item, which is exactly
+the read cost the `ProjectionExpression` exists to avoid. A search service does the job
+properly but adds a component, a cost line, and an index to keep in sync with the table.
+
+A word typed from an essay returns nothing and the screen says what search covers, rather
+than looking broken.
+
+### Nothing holds a copy of the criteria
+
+The prompt, the reply check, the weighted total, and a screen's per-criterion columns all
+read the `criteria` list on the rubric item. No criterion id, name, maximum, or weight is
+written into a worker, a handler, or the web app.
+
+**That includes the rubric text itself.** The prompt's rubric section is assembled from the
+criteria — names, maxima, and level descriptions — not read from a file at run time.
+`rubric.md` is where the first version's criteria are seeded from, and after that it is a
+human-readable original rather than a live input. Sending the file while ranges came from the
+item would put the maxima in two places, which is the same drift we removed from the weights:
+the file says a criterion is out of 4, the item says 3, and the model and the range check
+disagree without either being obviously wrong.
+
+*Alternative — send `rubric.md` and keep only ids, maxima, and weights on the item.* One less
+assembly step, and the level text stops being data: a scholarship with different criteria then
+needs a new file in the repo, and the maxima exist twice. Rejected.
+
+We just removed three copies of the weight table. Hardcoding the five criteria in the
+frontend and the prompt would put two of them straight back — the frontend copy being the
+worse one, because it drifts silently and only shows up as a mislabelled column.
+
+The payoff: a scholarship whose criteria are not the SJSU General five is a rubric item, not
+a code change. A changed maximum or weight is followed by the prompt, the range check, and
+the total at once, because none of them has its own version of it.
+
+*No `kind` field on a criterion* (`scored` / `gate` / `computed`). It would be needed for the
+AI-detection gate, which is `human-in-the-loop` and deferred, and for a computed criterion,
+which nothing asks for. `criteria` is a list of maps, so adding the field later is a field,
+not a migration. Every criterion today is scored, weighted, and model-judged.
+
+### The review screen stays shut
+
+Sign-off, the review queue, and the AI-detection gate are `human-in-the-loop`, which is not
+built. The screen says that rather than rendering an empty version of itself. Nothing
+elsewhere offers a reviewer identity, an approval, or a comparison against a human score.
+
+`human-in-the-loop/spec.md` is written here only as far as the rules that hold whatever we
+decide. No task in this change implements any of it, and nothing in this change's four phases
+depends on it. It is left alone from here on — the shape of the loop is a later change's to
+settle.
+
+## Risks / Trade-offs
+
+- **Two criteria have no essay to read.** The parser maps three essay columns —
+  `career_goals`, `challenge_or_mistake`, `extracurricular_activities` — against five rubric
+  criteria. Initiative & Self-Motivation and Creativity have no question of their own, so the
+  model judges them across the same three answers it used for the other three. That is a
+  scoring-validity question, not a plumbing one: a criterion with no dedicated evidence is
+  the weakest score in the set, and it carries weight in the total like any other. → Named
+  here so it is a known limit rather than a surprise. Fixing it properly means either a
+  questionnaire that asks about those two, or a rubric whose criteria match the questions
+  asked. Both are outside this change.
+
+- **Half points are allowed everywhere, so the reply check has to enforce the step.**
+  Accepting floats without a step rule is how 3.7 becomes a stored score. → The check
+  requires a whole or half point within each criterion's maximum and fails anything finer.
+  It does not round — rounding would be the check inventing a score the model did not give.
+  The level descriptions the prompt is assembled from come from `rubric.md`, which says half
+  points are expected; the Lambda sample's rubric, which never mentions them, is not used.
+
+- **Prompt caching is dropped — the prompt is too small for it.** Settled, see Decisions.
+  Worth keeping as a risk in one respect: nothing stops someone adding a cache checkpoint
+  later and believing it works, because an undersized prefix does not error. The call
+  succeeds and the prefix quietly is not cached. → The spec makes "no cache is claimed" a
+  requirement with a reporting scenario, so a false saving in a log line is a spec violation
+  rather than a plausible-looking number.
+
+- **`pk` and `sk` cannot be changed after the table exists.** Everything else about the
+  table can be. → They are pinned in the spec's data model and nothing else is. If the key
+  layout is wrong, the fix is a new table and a re-ingest — which the empty account makes
+  cheap now and expensive later.
+
+- **A new rubric version could look like it invalidated every stored total.** It doesn't:
+  publishing writes to no application, so every total keeps the version that made it and every
+  ranked list stays where it was. A cohort only moves when someone starts a run for the new
+  version. → Who may publish, and how, is phase 2's to settle. Until then a version is written
+  by hand and a run is how a cohort catches up.
+
+- **CloudFront invalidation is eventually consistent.** A deploy that uploads new assets
+  and invalidates can serve a stale `index.html` against new hashed chunks for a few
+  seconds. → Hashed filenames plus a no-cache `index.html`, so the worst case is one stale
+  page load, not a broken app.
+
+- **The reliability half of the dashboard is dead weight until IT delivers.** It renders
+  "waiting on data" indefinitely and nobody can tell whether it works. → It is kept because
+  the feature is coming, and it is kept independent so it cannot break the half that does
+  work. If the data never arrives, deleting it is a later decision, not this change's.
+
+- **`font-mondwest` is used in `features/applications/applications-table.tsx` and defined
+  in no stylesheet.** A dead class that will silently fall back. → Remove it when that file
+  is rebuilt in phase 4.
+
+## Migration Plan
+
+There is nothing to migrate. The stores were destroyed, so the first deploy comes up empty
+and a workbook has to be uploaded before any screen has something to show.
+
+Deploy order, once per environment:
+
+1. `cdk bootstrap` — one time, in `dxhub-automation`.
+2. `DataStack`, then `EdgeStack`. Data first because everything else references it.
+3. Create the first user in the pool by hand. There is no public sign-up.
+4. Write the first rubric item — `RUBRIC#sjsu_general` / `V#v1`, its criteria seeded from
+   `rubric.md` and its weights from the table those five criteria have always used. Nothing
+   can be scored before this exists, because the prompt, the range check, and the total are
+   all built from it.
+5. Build the web app with the pool id and sign-in domain, upload, invalidate.
+6. Upload a workbook from the dashboard, then press the scoring button.
+
+**Rollback.** Redeploy the previous `EdgeStack` and `ComputeStack`; both are replaceable.
+`DataStack` is not rolled back — it carries `RETAIN` and holds the only copy of the data. A
+schema mistake inside the table is fixed forward, by a re-ingest rather than a stack
+rollback.
+
+## Open Questions
+
+None. Everything that was open is decided and written into the spec: half points, the export
+split, where the criteria live, and — after checking rather than asking — how an applicant is
+identified, the batch job shape, and prompt caching. What the checks found:
+
+| Was open | Answer | Where it landed |
+| --- | --- | --- |
+| What the `Student` column holds | A UUID. The export is anonymized on purpose and the name field is set to `None` in the parser | No name column: the UUID is the identifier, nothing stores a name, and search matches the UUID plus program, level, major, and GPA |
+| Bedrock batch's job shape | Verified against the docs. Minimum records is a per-model service quota, AWS's examples say 100 | The worker reads the quota instead of hardcoding it, and 500 clears the floor either way |
+| Whether the prompt is big enough to cache | No — about 1,000 tokens against a 4,096-token minimum | Caching dropped from both paths, and "no cache is claimed" is now a requirement |
+
+One thing surfaced that nobody had asked about: **three essay questions against five rubric
+criteria.** It is recorded under Risks rather than left as a question, because it is a limit
+to state, not a decision this change can make.
