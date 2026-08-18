@@ -5,6 +5,10 @@ awsx
 # institutional data pulled from s3 — do not commit
 materials/
 
+# scholarship exports — real applicant essays, never commit
+*.csv
+*.xlsx
+
 # personal project notes + local claude settings (holds api keys) — local only
 CLAUDE.local.md
 .claude/settings.local.json
