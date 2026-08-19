@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
@@ -6,12 +7,13 @@ import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import type { Construct } from 'constructs';
 import type { EnvStackProps } from './env';
 
-/** So the Vite dev server can sign in against the same pool. */
-const DEV_SERVER_ORIGIN = 'http://localhost:5173';
+/** So the Vite dev server can sign in against the same pool. Matches `vite.config.ts`. */
+const DEV_SERVER_ORIGIN = 'http://localhost:3000';
 
 /**
  * The front door: sign-in, the site bucket, the CloudFront distribution, and the HTTP API.
@@ -26,6 +28,7 @@ export class EdgeStack extends Stack {
   readonly siteBucket: s3.Bucket;
   readonly distribution: cloudfront.Distribution;
   readonly api: apigwv2.HttpApi;
+  readonly authorizer: HttpUserPoolAuthorizer;
 
   constructor(scope: Construct, id: string, props: EnvStackProps) {
     super(scope, id, props);
@@ -96,29 +99,43 @@ export class EdgeStack extends Stack {
       apiName: `${props.envName}-scholarship-api`,
     });
 
+    const apiLogs = new logs.LogGroup(this, 'ApiAccessLogs', {
+      logGroupName: `/aws/apigateway/${props.envName}-scholarship-api`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    // A rejected call has to be findable: path, method, status, and the reason the token check
+    // failed. Nothing else — no Authorization header, no request body, no claim about the
+    // caller or an applicant, because an access log is the one place those leak by default.
+    const apiStage = this.api.defaultStage?.node.defaultChild as apigwv2.CfnStage;
+    apiStage.accessLogSettings = {
+      destinationArn: apiLogs.logGroupArn,
+      format: JSON.stringify({
+        requestId: '$context.requestId',
+        requestTime: '$context.requestTime',
+        method: '$context.httpMethod',
+        path: '$context.path',
+        status: '$context.status',
+        // Empty on a call that passed the check; the reason it failed otherwise.
+        authError: '$context.authorizer.error',
+        error: '$context.error.message',
+      }),
+    };
+
     const apiOrigin = new origins.HttpOrigin(
       `${this.api.apiId}.execute-api.${this.region}.amazonaws.com`,
       { protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY },
     );
 
-    // Deep links are rewritten at the viewer, not mapped from an S3 error, so a missing asset
-    // still comes back as an error instead of the app shell with a 200.
+    // The code is a file so a test can run the same source that is deployed.
     const spaRewrite = new cloudfront.Function(this, 'SpaRewrite', {
       functionName: `${props.envName}-spa-rewrite`,
       comment: 'Serve the app shell for in-app routes',
       runtime: cloudfront.FunctionRuntime.JS_2_0,
-      code: cloudfront.FunctionCode.fromInline(
-        [
-          'function handler(event) {',
-          '  var request = event.request;',
-          "  var last = request.uri.split('/').pop();",
-          "  if (last.indexOf('.') === -1) {",
-          "    request.uri = '/index.html';",
-          '  }',
-          '  return request;',
-          '}',
-        ].join('\n'),
-      ),
+      code: cloudfront.FunctionCode.fromFile({
+        filePath: path.join(__dirname, 'spa-rewrite.js'),
+      }),
     });
 
     const siteOrigin = origins.S3BucketOrigin.withOriginAccessControl(this.siteBucket);
@@ -177,14 +194,17 @@ export class EdgeStack extends Stack {
     });
 
     // The token is checked here, before anything behind it runs. No handler in this repo
-    // verifies a signature, an issuer, an audience, or an expiry.
+    // verifies a signature, an issuer, an audience, or an expiry. The routes in ComputeStack
+    // reuse this one, so every route is checked the same way.
+    this.authorizer = new HttpUserPoolAuthorizer('JwtAuthorizer', this.userPool, {
+      userPoolClients: [this.userPoolClient],
+    });
+
     new apigwv2.HttpRoute(this, 'DefaultRoute', {
       httpApi: this.api,
       routeKey: apigwv2.HttpRouteKey.DEFAULT,
       integration: new HttpLambdaIntegration('Placeholder', placeholder),
-      authorizer: new HttpUserPoolAuthorizer('JwtAuthorizer', this.userPool, {
-        userPoolClients: [this.userPoolClient],
-      }),
+      authorizer: this.authorizer,
     });
 
     new CfnOutput(this, 'SiteUrl', { value: siteUrl });
