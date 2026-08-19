@@ -47,19 +47,37 @@ interface AnalyticsData {
   }>;
 }
 
-export function DashboardPage() {
-  const { data: stats, isLoading: statsLoading } = useQuery({
+/**
+ * Reliability analysis across every scholarship: human reviewers against each other, the model
+ * against them, and the per-criterion and per-scholarship breakdowns.
+ *
+ * It is waiting on last year's reader scores, which have not been delivered. Until they are,
+ * every section here says so and draws nothing — a zero or a percentage of nothing reads as a
+ * result. The two fetches are separate and neither gates the other, and neither gates the
+ * trigger section above.
+ */
+export function ReliabilitySection() {
+  const statsQuery = useQuery({
     queryKey: ["dashboard-stats"],
     queryFn: () => api<DashboardStats>("/dashboard/stats"),
+    retry: false,
   });
 
-  const { data: analytics, isLoading: analyticsLoading } = useQuery({
+  const analyticsQuery = useQuery({
     queryKey: ["analytics"],
     queryFn: () => api<AnalyticsData>("/analytics"),
+    retry: false,
   });
 
-  if (statsLoading || analyticsLoading) {
-    return <p className="text-sm text-muted-foreground">Loading dashboard...</p>;
+  const stats = statsQuery.data;
+  const analytics = analyticsQuery.data;
+
+  if (statsQuery.isLoading || analyticsQuery.isLoading) {
+    return <p className="text-sm text-muted-foreground">Reading the reliability data…</p>;
+  }
+
+  if (!stats && !analytics) {
+    return <WaitingOnData />;
   }
 
   const aiAvgDiff = parseFloat(analytics?.ai_human.avg_difference ?? "0");
@@ -68,27 +86,25 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      {/* Header */}
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight" style={{ color: 'var(--sjsu-blue)' }}>
-          Scholarship Review Dashboard
-        </h1>
+        <h2 className="text-xl font-semibold tracking-tight">Scoring reliability</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          San Jos&eacute; State University &mdash; AI-assisted scoring reliability analysis
+          Human reviewers against each other, and the model against them. Every scholarship, not
+          one cohort.
         </p>
       </div>
 
       {/* Row 1: Key Insight Banner */}
-      <div className="p-5 rounded-lg border-2" style={{ borderColor: 'var(--sjsu-gold)', backgroundColor: 'rgba(229, 168, 35, 0.05)' }}>
+      {analytics && <div className="p-5 rounded-lg border-2" style={{ borderColor: 'var(--sjsu-gold)', backgroundColor: 'rgba(229, 168, 35, 0.05)' }}>
         <p className="text-base font-medium" style={{ color: 'var(--sjsu-blue)' }}>
           Human reviewers disagree with each other by an average of <strong>{humanAvgDiff}</strong> points per criterion.
           The AI disagrees with humans by <strong>{aiAvgDiff}</strong> points &mdash;{" "}
           <span style={{ color: 'var(--sjsu-gold)' }}>{improvementPct}% more consistent</span> than human-to-human scoring.
         </p>
-      </div>
+      </div>}
 
       {/* Row 2: Side-by-Side Comparison */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {analytics && stats && <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <ComparisonCard
           title="Human vs Human"
           subtitle="Inter-rater reliability"
@@ -115,7 +131,9 @@ export function DashboardPage() {
             {stats?.flagged_for_review.toLocaleString() ?? "0"}
           </p>
         </div>
-      </div>
+      </div>}
+
+      {(!analytics || !stats) && <WaitingOnData />}
 
       {/* Row 3: Human Reviewer Agreement Distribution */}
       {analytics?.reviewer_distribution && analytics.reviewer_distribution.length > 0 && (
@@ -291,6 +309,19 @@ function DistBar({
       <span className="text-sm w-20 text-muted-foreground text-right">
         {count !== undefined ? `${count.toLocaleString()}` : `${Math.round(pct)}%`}
       </span>
+    </div>
+  );
+}
+
+/** No human scores have been delivered, so there is nothing to compare and nothing to draw. */
+function WaitingOnData() {
+  return (
+    <div className="p-5 rounded-lg border border-border">
+      <h2 className="text-lg font-semibold">Scoring reliability</h2>
+      <p className="text-sm text-muted-foreground mt-1">
+        Waiting on data. Last year's reader scores have not been delivered, so there is nothing
+        to compare the model against — no agreement rate, no variance, and no chart.
+      </p>
     </div>
   );
 }

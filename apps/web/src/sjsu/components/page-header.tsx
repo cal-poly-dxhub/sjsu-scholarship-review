@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { Moon, Sun } from "lucide-react";
+import { LogOut, Moon, Sun } from "lucide-react";
+import { signOut } from "@/auth";
 import { Logo } from "@/sjsu/components/logo";
 import { Button } from "@/sjsu/components/ui/button";
 import { useTheme } from "@/sjsu/lib/theme";
@@ -36,6 +37,15 @@ export function PageHeader({
         className="shrink-0 text-muted-foreground"
       >
         {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={signOut}
+        aria-label="Sign out"
+        className="shrink-0 text-muted-foreground"
+      >
+        <LogOut className="h-4 w-4" />
       </Button>
     </header>
   );

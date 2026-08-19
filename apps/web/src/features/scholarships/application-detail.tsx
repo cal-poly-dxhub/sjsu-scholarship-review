@@ -1,171 +1,279 @@
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/api";
 import { ArrowLeft } from "lucide-react";
-
-interface CriterionScore {
-  criterion: string;
-  score: number;
-  reasoning?: string;
-  evidence?: Array<{ question_id: string; quote: string }>;
-}
+import { api } from "@/api";
+import { Badge } from "@/sjsu/components/ui/badge";
+import { Button } from "@/sjsu/components/ui/button";
+import { Card, CardContent } from "@/sjsu/components/ui/card";
+import { Separator } from "@/sjsu/components/ui/separator";
+import { applicationExport, download } from "./export";
 
 interface QAPair {
+  question_id: string;
   question: string;
   answer: string;
-  question_id: string;
 }
 
-interface ApplicationDetailData {
-  application_key: string;
-  gpa: string | null;
-  major: string | null;
-  academic_level: string | null;
+interface Application {
+  student_uuid: string;
+  status: string;
   academic_program: string | null;
-  year: string | null;
-  availability_id: string | null;
-  qa_pairs: QAPair[];
-  human_criterion_scores: CriterionScore[];
-  human_weighted_total: number;
-  criterion_scores: CriterionScore[];
-  llm_weighted_score: number;
-  variance_pct: number;
-  needs_human_review: boolean;
-  review_criterion_scores: CriterionScore[] | null;
-  review_weighted_score: number | null;
+  academic_level: string | null;
+  major: string | null;
+  gpa: string | number | null;
+  total_score: number | null;
+  rubric_version: string | null;
+  latest_scored_at: string | null;
+  category_scores: Record<string, { score: number; max: number }> | null;
+  claimed_until: string | null;
+  attempt: number | null;
+  failure: string | null;
+  last_error: string | null;
+  qa_pairs: QAPair[] | null;
+}
+
+/** A score item's per-criterion entry. The reasoning and the quote live only here. */
+interface ScoredCriterion {
+  score: number;
+  max: number;
+  reasoning: string;
+  evidence: string;
+}
+
+interface ScoreItem {
+  category_scores: Record<string, ScoredCriterion>;
+  total_score: number;
+  reasoning_summary: string;
+  rubric_version: string;
+  model_id: string;
+  worker: string;
+}
+
+interface Criterion {
+  id: string;
+  name: string;
+  max: number;
+  weight: number;
+}
+
+interface DetailResponse {
+  application: Application;
+  score: ScoreItem | null;
+}
+
+interface VersionsResponse {
+  versions: { version: string; criteria: Criterion[] }[];
 }
 
 export function ApplicationDetail({
-  applicationKey,
+  scholarship,
+  year,
+  studentUuid,
   onBack,
 }: {
-  applicationKey: string;
+  scholarship: string;
+  year: string;
+  studentUuid: string;
   onBack: () => void;
 }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["application-detail", applicationKey],
-    queryFn: () => api<ApplicationDetailData>(`/applications/${applicationKey}`),
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["application", scholarship, year, studentUuid],
+    queryFn: () =>
+      api<DetailResponse>(
+        `/application?scholarship=${encodeURIComponent(scholarship)}` +
+          `&year=${encodeURIComponent(year)}&student=${encodeURIComponent(studentUuid)}`,
+      ),
   });
 
-  if (isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading application...</p>;
-  }
+  const versionsQuery = useQuery({
+    queryKey: ["rubric-versions", scholarship],
+    queryFn: () =>
+      api<VersionsResponse>(`/rubric-versions?scholarship=${encodeURIComponent(scholarship)}`),
+  });
 
-  if (!data) {
-    return <p className="text-sm text-red-600">Application not found.</p>;
-  }
-
-  // Build a lookup for human scores by criterion
-  const humanScores: Record<string, number> = {};
-  for (const cs of data.human_criterion_scores) {
-    humanScores[cs.criterion] = cs.score;
-  }
+  const application = data?.application;
+  const score = data?.score ?? null;
+  // The criteria of the version this score was made under, in the rubric's own order. A
+  // criterion the score does not carry is shown as missing rather than as a zero.
+  const criteria =
+    versionsQuery.data?.versions.find((v) => v.version === score?.rubric_version)?.criteria ?? [];
 
   return (
-    <div className="space-y-8">
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={onBack}
-          className="p-1.5 rounded-md hover:bg-accent transition-colors"
-          aria-label="Back"
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </button>
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight font-mono">
-            {data.application_key}
-          </h1>
+    <div className="space-y-5">
+      <div className="flex items-start gap-3">
+        <Button variant="ghost" size="icon" onClick={onBack} aria-label="Back to the cohort">
+          <ArrowLeft />
+        </Button>
+        <div className="flex-1">
+          <h1 className="font-mono text-xl font-semibold">{studentUuid}</h1>
           <p className="text-sm text-muted-foreground">
-            {data.availability_id} &middot; {data.year}
+            {scholarship} · {year}
           </p>
         </div>
-      </div>
-
-      {/* Metadata */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="p-3 rounded-lg border border-border">
-          <p className="text-xs text-muted-foreground">GPA</p>
-          <p className="text-lg font-semibold">{data.gpa ?? "—"}</p>
-        </div>
-        <div className="p-3 rounded-lg border border-border">
-          <p className="text-xs text-muted-foreground">Major</p>
-          <p className="text-lg font-semibold truncate">{data.major ?? "—"}</p>
-        </div>
-        <div className="p-3 rounded-lg border border-border">
-          <p className="text-xs text-muted-foreground">Academic Level</p>
-          <p className="text-lg font-semibold">{data.academic_level ?? "—"}</p>
-        </div>
-        <div className="p-3 rounded-lg border border-border">
-          <p className="text-xs text-muted-foreground">Variance</p>
-          <p className={`text-lg font-semibold ${data.variance_pct > 20 ? "text-red-600" : ""}`}>
-            {data.variance_pct}%
-          </p>
-        </div>
-      </div>
-
-      {/* Score Summary */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="p-4 rounded-lg border border-border text-center">
-          <p className="text-xs text-muted-foreground mb-1">Human Score</p>
-          <p className="text-2xl font-bold">{data.human_weighted_total}</p>
-        </div>
-        <div className="p-4 rounded-lg border border-border text-center">
-          <p className="text-xs text-muted-foreground mb-1">AI Score</p>
-          <p className="text-2xl font-bold">{data.llm_weighted_score}</p>
-        </div>
-        {data.review_weighted_score != null && (
-          <div className="p-4 rounded-lg border border-blue-200 bg-blue-50 text-center">
-            <p className="text-xs text-blue-600 mb-1">Review Score (Final)</p>
-            <p className="text-2xl font-bold text-blue-700">{data.review_weighted_score}</p>
-          </div>
+        <Badge variant="outline">unreviewed</Badge>
+        {application && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              download(
+                `${scholarship}-${year}-${studentUuid}.json`,
+                // The reasoning is already on screen, so this export always carries it.
+                applicationExport({ scholarship, year, criteria, application, score }),
+              )
+            }
+          >
+            Export JSON
+          </Button>
         )}
       </div>
 
-      {/* Criterion Scores Comparison */}
-      <div>
-        <h2 className="text-lg font-semibold mb-3">Criteria Breakdown</h2>
-        <div className="border border-border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border bg-muted/50">
-                <th className="text-left px-4 py-2.5 font-medium">Criterion</th>
-                <th className="text-right px-4 py-2.5 font-medium">Human</th>
-                <th className="text-right px-4 py-2.5 font-medium">AI</th>
-                <th className="text-left px-4 py-2.5 font-medium">AI Reasoning</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.criterion_scores.map((cs) => (
-                <tr key={cs.criterion} className="border-b border-border last:border-0">
-                  <td className="px-4 py-2.5 font-medium">{cs.criterion}</td>
-                  <td className="px-4 py-2.5 text-right">
-                    {humanScores[cs.criterion] ?? "—"}
-                  </td>
-                  <td className="px-4 py-2.5 text-right">{cs.score}</td>
-                  <td className="px-4 py-2.5 text-muted-foreground text-xs max-w-md">
-                    {cs.reasoning ?? "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {isLoading && <p className="text-sm text-muted-foreground">Reading the application…</p>}
+      {isError && (
+        <p className="text-sm text-muted-foreground">
+          The read failed. Try again, and check the scholarship, year, and applicant id.
+        </p>
+      )}
 
-      {/* Essays */}
-      <div>
-        <h2 className="text-lg font-semibold mb-3">Application Essays</h2>
-        <div className="space-y-4">
-          {data.qa_pairs.map((qa, i) => (
-            <div key={i} className="p-4 rounded-lg border border-border">
-              <p className="text-sm font-medium text-muted-foreground mb-2">
-                {qa.question}
+      {application && (
+        <>
+          <Card size="sm">
+            <CardContent className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <Field label="Program" value={application.academic_program} />
+              <Field label="Level" value={application.academic_level} />
+              <Field label="Major" value={application.major} />
+              <Field label="GPA" value={application.gpa} />
+            </CardContent>
+          </Card>
+
+          {score === null ? (
+            <NoScore application={application} />
+          ) : (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-semibold">Scores by criterion</h2>
+                <Badge variant="secondary">total {score.total_score}</Badge>
+                <Badge variant="outline">rubric {score.rubric_version}</Badge>
+                <Badge variant="outline">unreviewed</Badge>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Scored by {score.model_id} on the {score.worker} path. Nobody has signed this
+                off — reviewer sign-off is not built.
               </p>
-              <p className="text-sm whitespace-pre-wrap">{qa.answer}</p>
+
+              <Card size="sm">
+                <CardContent>
+                  <p className="text-xs text-muted-foreground">Summary</p>
+                  <p className="mt-1 text-sm">{score.reasoning_summary}</p>
+                </CardContent>
+              </Card>
+
+              {criteria.map((criterion) => (
+                <CriterionCard
+                  key={criterion.id}
+                  criterion={criterion}
+                  scored={score.category_scores[criterion.id]}
+                />
+              ))}
             </div>
-          ))}
+          )}
+
+          {application.qa_pairs && application.qa_pairs.length > 0 && (
+            <div className="space-y-3">
+              <Separator />
+              <h2 className="text-lg font-semibold">Answers</h2>
+              {application.qa_pairs.map((pair) => (
+                <Card key={pair.question_id} size="sm">
+                  <CardContent>
+                    <p className="text-xs text-muted-foreground">{pair.question}</p>
+                    <p className="mt-2 text-sm whitespace-pre-wrap">{pair.answer}</p>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function CriterionCard({
+  criterion,
+  scored,
+}: {
+  criterion: Criterion;
+  scored: ScoredCriterion | undefined;
+}) {
+  return (
+    <Card size="sm">
+      <CardContent className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium">{criterion.name}</span>
+          <Badge variant="secondary">
+            {scored ? `${scored.score} / ${scored.max}` : "not scored"}
+          </Badge>
+          <Badge variant="outline">weight {criterion.weight}</Badge>
         </div>
-      </div>
+        {scored ? (
+          <>
+            <p className="text-sm">{scored.reasoning}</p>
+            {scored.evidence && (
+              <blockquote className="border-l-2 border-border pl-3 text-sm text-muted-foreground">
+                {scored.evidence}
+              </blockquote>
+            )}
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            This criterion is not on the score item, so there is nothing to read.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Why there are no scores to read: unscored, running, or a failed attempt. */
+function NoScore({ application }: { application: Application }) {
+  const running =
+    application.status === "processing" &&
+    (application.claimed_until ?? "") > new Date().toISOString();
+
+  return (
+    <Card size="sm">
+      <CardContent className="space-y-2">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold">No scores yet</h2>
+          <Badge variant={application.status === "score_failed" ? "warning" : "outline"}>
+            {application.status === "score_failed" ? "failed" : running ? "running" : "unscored"}
+          </Badge>
+        </div>
+        {application.status === "score_failed" ? (
+          <p className="text-sm text-muted-foreground">
+            {application.failure ?? "The attempt failed."}
+            {application.last_error ? ` — ${application.last_error}` : ""} Start a run from the
+            dashboard to try it again.
+          </p>
+        ) : running ? (
+          <p className="text-sm text-muted-foreground">
+            A run holds this application right now. Its scores appear when the run writes them.
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Nothing has scored this application. Start a run for its scholarship and year from the
+            dashboard.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Field({ label, value }: { label: string; value: string | number | null }) {
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-sm">{value ?? "—"}</p>
     </div>
   );
 }

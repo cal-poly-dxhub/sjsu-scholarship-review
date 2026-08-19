@@ -251,57 +251,6 @@ def reviews_list():
     return {"reviews": results}
 
 
-REVIEW_WEIGHTS = {
-    "Extracurricular Activities":   {"max": 1, "weight": 10},
-    "Career Goals Essay":           {"max": 4, "weight": 40},
-    "Challenge Essay":              {"max": 4, "weight": 30},
-    "Initiative & Self-Motivation": {"max": 3, "weight": 10},
-    "Creativity":                   {"max": 3, "weight": 10},
-}
-
-
-@app.post("/reviews/{application_key}/submit")
-def submit_review(application_key: str, body: dict):
-    """Submit tiebreaker scores. Calculates new weighted score and clears the review flag."""
-    sc_table = scores_table()
-    app_table = applications_table()
-
-    criterion_scores = body.get("criterion_scores", [])
-    if not criterion_scores:
-        return {"error": "criterion_scores required"}, 400
-
-    # Calculate weighted score from reviewer's criteria (same formula as LLM)
-    total = 0.0
-    for cs in criterion_scores:
-        w = REVIEW_WEIGHTS.get(cs.get("criterion", ""))
-        if w and w["max"] > 0:
-            total += (float(cs["score"]) / w["max"]) * w["weight"]
-    review_weighted_score = round(total, 2)
-
-    # Update the score record with review scores
-    sc_table.update_item(
-        Key={"application_key": application_key},
-        UpdateExpression="SET review_criterion_scores = :rcs, review_weighted_score = :rws",
-        ExpressionAttributeValues={
-            ":rcs": _decimalize(criterion_scores),
-            ":rws": _decimalize(review_weighted_score),
-        },
-    )
-
-    # Clear the flag on the applications table
-    app_table.update_item(
-        Key={"application_key": application_key},
-        UpdateExpression="SET needs_human_review = :flag",
-        ExpressionAttributeValues={":flag": False},
-    )
-
-    return {
-        "application_key": application_key,
-        "review_weighted_score": review_weighted_score,
-        "needs_human_review": False,
-    }
-
-
 # --- Dashboard Stats ---
 
 
