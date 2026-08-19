@@ -1,4 +1,4 @@
-import { RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import type { Construct } from 'constructs';
@@ -10,19 +10,28 @@ export const BUCKET_PREFIXES = {
   uploads: 'uploads/',
   /** Bedrock batch job input and output. Only the batch worker touches it. */
   batch: 'batch/',
-  /** Anything produced for people to download. */
-  analytics: 'analytics/',
 } as const;
 
 /** The ranking index: a cohort's comparable totals, already in score order. */
 export const RANK_INDEX_NAME = 'rank-by-total';
+
+/** Where the dashboard runs while someone is developing it. */
+const DEV_SERVER_ORIGIN = 'http://localhost:3000';
+
+export interface DataStackProps extends EnvStackProps {
+  /**
+   * The site's own origin, e.g. `https://d111.cloudfront.net`. The bucket answers the upload
+   * preflight for it and nothing else.
+   */
+  readonly siteOrigin: string;
+}
 
 /** The stores that outlive every redeploy: the scholarship table and the environment bucket. */
 export class DataStack extends Stack {
   readonly table: dynamodb.Table;
   readonly bucket: s3.Bucket;
 
-  constructor(scope: Construct, id: string, props: EnvStackProps) {
+  constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
 
     // pk and sk are the one thing that cannot be changed once the table exists. What they
@@ -65,7 +74,35 @@ export class DataStack extends Stack {
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      // Uploads reach the ingest worker through EventBridge rather than a bucket notification.
+      // A notification would have to hold the worker's ARN, which puts this stack downstream of
+      // the one that reads from it and CloudFormation refuses the loop.
+      eventBridgeEnabled: true,
       removalPolicy: RemovalPolicy.RETAIN,
+      // The browser sends the workbook straight here with a presigned PUT, which is cross-origin,
+      // and a PUT always preflights. Only the bucket can answer that OPTIONS, so without this
+      // rule every upload fails before a byte moves. PUT alone: a presigned URL that leaks is
+      // then no use for reading anything back out.
+      cors: [
+        {
+          allowedMethods: [s3.HttpMethods.PUT],
+          allowedOrigins: [props.siteOrigin, DEV_SERVER_ORIGIN],
+          allowedHeaders: ['content-type'],
+          exposedHeaders: ['ETag'],
+          maxAge: 3600,
+        },
+      ],
+      lifecycleRules: [
+        // Bedrock copies each record's input into its output, so batch files hold two copies
+        // of every essay. They are only needed while a run can still be looked into.
+        {
+          id: 'expire-batch-files',
+          prefix: BUCKET_PREFIXES.batch,
+          expiration: Duration.days(30),
+          noncurrentVersionExpiration: Duration.days(7),
+          abortIncompleteMultipartUploadAfter: Duration.days(7),
+        },
+      ],
     });
   }
 }
