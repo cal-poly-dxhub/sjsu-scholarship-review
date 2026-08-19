@@ -8,8 +8,12 @@ phase 1 below, the rest as we reach them.
 
 Two diagrams, because they meet in one place: the central table. The reviewer's side
 puts requests in and reads results out; the scoring side takes work off the table and
-writes scores back. Neither side calls the other. Dashed lines are parts still to be
-written; numbers are the order things happen in.
+writes scores back. Numbers are the order things happen in.
+
+Both diagrams name things the same way: one box per Lambda under its own function name, one
+`DynamoDB central table`, and an S3 box that says which bucket and which prefix. Dashed means
+not written yet — so the reviewer's side is part dashed, and the scoring side is not dashed at
+all because none of it exists, which its heading says instead.
 
 **The reviewer's side — one front door.** The web app and the API sit behind the same
 CloudFront distribution on one domain: everything under `/api/` goes to the API, the
@@ -24,15 +28,16 @@ flowchart LR
 
     subgraph door["One domain — CloudFront"]
         cf[CloudFront]
-        s3web[(S3<br/>web build)]
+        s3web[(S3 site bucket<br/>web build)]
         apigw[API Gateway]
         authz{{JWT authorizer}}
-        stub[501 placeholder]
-        runtime[Lambda handlers<br/>boto3]
+        stub[api-placeholder<br/>501]
+        rlist[rubric-versions<br/>one Query per scholarship]
+        rpub[rubric-publish<br/>parse · validate · write]
+        rest[the remaining handlers<br/>contract still open]
     end
 
     ddb[(DynamoDB<br/>central table)]
-    s3data[(S3<br/>analytics)]
 
     reviewer -->|1 · sign in| cognito
     cognito -->|2 · tokens| reviewer
@@ -41,48 +46,61 @@ flowchart LR
     cf -->|"4b · /api/, token forwarded"| apigw
     apigw --> authz
     authz -->|bad token · 401| reviewer
-    authz -->|valid · today| stub
-    authz -.->|valid · phase 2| runtime
-    runtime -.->|read + write| ddb
-    runtime -.->|exports| s3data
+    authz -->|valid · today, every route| stub
+    authz -.->|valid · phase 2| rlist
+    authz -.->|valid · phase 2| rpub
+    authz -.->|valid · phase 2| rest
+    rlist -.->|read| ddb
+    rpub -.->|write a version| ddb
+    rest -.->|read + write| ddb
 
     classDef later stroke-dasharray: 5 5
-    class runtime later
+    class rlist,rpub,rest later
 ```
+
+Each box is one Lambda. The two rubric handlers are named because they are settled and come
+first — nothing can be scored before a rubric version exists. The rest of the route contract
+is open, so it is one box rather than a list of guesses. No handler writes to S3: an export
+is built from the read the screen already made.
 
 **The scoring side — phase 3.** This follows the version-0 architecture from the
 project deck: upload to S3, ingest into one central table, a worker that calls Bedrock
 and writes results back to the same table. What is added is the second path through
 Bedrock batch.
 
-Nothing here starts itself. A person presses a button on the dashboard, and how many
-applications need scoring decides which path runs — under 500 the on-demand worker, at 500
+No run starts itself. The same reviewer as in the first diagram — access is all or
+nothing, so there is no second kind of account — presses a button on the dashboard, and how
+many applications need scoring decides which path runs — under 500 the on-demand worker, at 500
 or more the batch job. Only the batch path touches S3, because Bedrock batch takes its
-records as a file and writes its results back as one.
+records as a file and writes its results back as one. The one thing that fires on its own is
+the batch job's own finish: a job runs for hours and a Lambda gets fifteen minutes, so
+`score-batch` submits and stops, and the job's state-change event starts it again to collect.
 
 ```mermaid
 flowchart TB
-    uploads[(S3<br/>uploads)]
-    ingest[Ingest]
+    uploads[(S3 env bucket<br/>uploads/)]
+    ingest[ingest-worker]
     table[(DynamoDB<br/>central table)]
-    person([Person on the dashboard])
+    person([Reviewer, on the dashboard])
     pick{{How many to score?}}
 
-    subgraph live["Scoring worker — one item per call"]
+    subgraph live["score-ondemand — one item per call"]
         claim1[Claim item]
         conv{{Bedrock Converse}}
     end
 
-    subgraph batch["Batch scoring worker — many items per job"]
-        claim2[Claim items]
-        files[(S3<br/>batch in · out)]
-        job{{Bedrock batch job<br/>no tool call}}
+    subgraph batch["score-batch — many items per job, submit then collect"]
+        claim2[Submit · claim items]
+        files[(S3 env bucket<br/>batch/ in · out)]
+        job{{Bedrock batch job<br/>no tool call · 36h}}
+        evt[EventBridge<br/>job state change]
+        collect[Collect · read output]
     end
 
     uploads -->|1 · new export| ingest
     ingest -->|2 · unscored items| table
 
-    person -->|3 · start scoring| pick
+    person -->|3 · start scoring, through the front door| pick
     pick -->|"under 500"| claim1
     pick -->|"500 or more"| claim2
 
@@ -93,13 +111,29 @@ flowchart TB
 
     table -->|4b · not processing| claim2
     claim2 -->|5b · one record each| files
-    files -->|6b · submit| job
+    files -->|6b · submit, then stop| job
     job -->|7b · output| files
-    files -->|8b · match by record id| claim2
-    claim2 -->|9b · scores| table
+    job -->|8b · finished| evt
+    evt -->|9b · start collect| collect
+    files -->|10b · match by record id| collect
+    collect -->|11b · scores| table
 
     table -->|progress, from item states| person
 ```
+
+Three Lambdas, one box each: `ingest-worker`, `score-ondemand`, and `score-batch`. The two
+scoring workers are separate functions, not two branches of one, because they need different
+timeouts and different IAM — `score-batch` is the only thing in the system with the `batch/`
+prefix and the batch job permissions. They share the prompt builder and the reply check, so
+the same input gives the same score either way. `score-batch` has one box but two ways in:
+a person starts the submit, and the job's own event starts the collect.
+
+**Where the two diagrams touch, besides the table.** The workbook that lands in `uploads/` and
+the button that starts a run both arrive through the front door in the first diagram, and the
+route for either one is inside `the remaining handlers`. Until that route exists the workers
+are triggered by hand — which is why neither diagram shows a queue or a schedule. The single
+event in either diagram is the batch job telling the collector it is done; nothing starts a
+run on its own.
 
 ## Data model
 
@@ -166,15 +200,27 @@ the export carries no name, so an application is identified by its UUID througho
 | Attribute | Type | |
 | --- | --- | --- |
 | `pk`, `sk` | String | `RUBRIC#sjsu_general`, `V#v1` |
-| `criteria` | List of Maps | `{id, name, max, weight, levels}` — the one home for the weights |
-| `published_at`, `published_by` | String | |
+| `criteria` | List of Maps | `{id, name, max, weight, levels, guidance}` — the one home for the weights |
+| `preamble` | String | the rubric's own text: how to grade, and that half points are expected |
+| `source_file`, `source_text` | String | the file the version was published from, as uploaded |
+| `published_at`, `published_by` | String | when, and whose account did it |
+
+A criterion's `id` is its name slugged, so nothing outside the rubric gets to name a criterion.
+`guidance` is the prose inside a criterion's block — an essay prompt, or where its evidence may
+come from — and `preamble` is the text before the first criterion. Both are assembled into the
+prompt, because a rubric that says half points are expected says it there and nowhere else.
+
+`source_text` is provenance and nothing else. It is shown to a person beside the criteria that
+were parsed out of it, so a mismatch is visible, and it is never sent to a model. Sending the
+file as well would put the maxima in two places, which is the drift the `criteria` list exists
+to remove.
 
 **A scoring run needs no item of its own.** Whether a run is in flight, how far it has
 got, and what is left are all counts over the cohort Query the screen already makes:
 `status` plus an unexpired `claimed_until`. `claimed_by` carries whatever holds the claim —
-a run id on the on-demand path, the Bedrock batch job's identifier on the batch path — so
-polling a submitted job is a read of any claimed item. Nothing about a run is stored that
-the applications do not already say.
+a run id on the on-demand path, the Bedrock batch job's name on the batch path — so showing
+what a submitted job is waiting on is a read of any claimed item. Nothing about a run is
+stored that the applications do not already say.
 
 `category_scores` and `total_score` appear on both the application and the score item. The
 score item is the immutable record, so it has to be readable on its own for history to
@@ -375,8 +421,8 @@ origin.
 
 ### Requirement: Unauthenticated API calls are rejected at the edge
 
-Every route behind the API endpoint SHALL require a valid access token, sent as
-`Authorization: Bearer <token>`. A request failing that check SHALL be rejected with
+Every route behind the API endpoint SHALL require a valid token from this environment's user
+pool, sent as `Authorization: Bearer <token>`. A request failing that check SHALL be rejected with
 `401` at the edge and SHALL NOT reach anything behind it.
 
 #### Scenario: No token
@@ -391,7 +437,7 @@ Every route behind the API endpoint SHALL require a valid access token, sent as
 
 #### Scenario: Expired token
 
-- **WHEN** a request carries an access token whose expiry has passed
+- **WHEN** a request carries a token whose expiry has passed
 - **THEN** the edge responds `401` and nothing behind it runs
 
 #### Scenario: Token for the wrong client
@@ -402,7 +448,7 @@ Every route behind the API endpoint SHALL require a valid access token, sent as
 
 #### Scenario: Valid token
 
-- **WHEN** a request carries an unexpired access token from this environment's
+- **WHEN** a request carries an unexpired token from this environment's
   directory and app client
 - **THEN** the edge passes it through, along with the caller's subject and email
   claims
@@ -423,10 +469,12 @@ read no data store.
 - **WHEN** the placeholder answers a request
 - **THEN** it reads no table and no bucket
 
-### Requirement: No cross-origin access is granted
+### Requirement: The only cross-origin access granted is the upload PUT
 
-Because the app and the API share one origin, the API SHALL NOT grant cross-origin
-access to anyone.
+Because the app and the API share one origin, the API SHALL NOT grant cross-origin access to
+anyone. The environment bucket SHALL grant exactly one: `PUT` from the app's own origins, so
+the browser's presigned upload of a workbook is answered. No other method and no other origin
+SHALL be allowed, and no read SHALL be.
 
 #### Scenario: Call from the web app
 
@@ -437,6 +485,19 @@ access to anyone.
 
 - **WHEN** a browser on any other origin calls the API
 - **THEN** no origin is granted access, and the browser blocks the response
+
+#### Scenario: A workbook is uploaded from the browser
+
+- **WHEN** the browser preflights its presigned `PUT` to the bucket
+- **THEN** the bucket answers it, because the app's own origin and that one method are allowed,
+  and the file goes straight to the bucket rather than through a request body with a 6 MB cap
+
+#### Scenario: Another origin, or another method, on the bucket
+
+- **WHEN** a browser on any other origin, or the app's origin with any method other than `PUT`,
+  makes a cross-origin request to the bucket
+- **THEN** no origin is granted access, so a leaked presigned URL cannot be spent from a page
+  the environment does not serve
 
 ### Requirement: API requests are traceable
 
@@ -451,7 +512,7 @@ whether the token check passed.
 ### Requirement: Each environment owns its own data stores
 
 An environment SHALL have one table holding applications, scores, and rubrics, and one
-bucket holding uploaded workbooks, batch files, and analytics under separate prefixes, both
+bucket holding uploaded workbooks and batch files under separate prefixes, both
 named so they cannot collide with another environment's. Creating an environment SHALL NOT
 read from or write to any store outside it.
 
@@ -479,6 +540,14 @@ read from or write to any store outside it.
 - **THEN** the key prefix keeps the other kinds out of the result, and no two kinds can
   collide on one key
 
+#### Scenario: Batch files do not pile up
+
+- **WHEN** a batch job's input and output objects are older than the window a run can be
+  looked into
+- **THEN** they are deleted, along with their old versions, because they hold the applicant's
+  own words — the model service copies each record's input into its output, so leaving them
+  keeps two copies of every essay in the bucket for good
+
 ### Requirement: Data at rest is encrypted and recoverable
 
 Every table and bucket the platform owns SHALL be encrypted at rest, SHALL refuse
@@ -492,7 +561,7 @@ unencrypted transport, and SHALL survive deletion of the deployment that created
 #### Scenario: Tearing down a deployment
 
 - **WHEN** the deployment defining an environment is deleted
-- **THEN** its table and analytics bucket are retained, not destroyed
+- **THEN** its table and its bucket are retained, not destroyed
 
 #### Scenario: Recovering a table
 
@@ -592,14 +661,22 @@ PKCE. It SHALL NOT collect a password itself.
 
 ### Requirement: Every API call carries a token, and expiry is handled
 
-The web app SHALL attach the access token to every API request. It SHALL refresh the
-token before it expires, and SHALL send the reviewer back to sign-in when refreshing is
+The web app SHALL attach the ID token to every API request, because the API records which
+account published a rubric version and only the ID token carries the email. It SHALL refresh
+the token before it expires, and SHALL send the reviewer back to sign-in when refreshing is
 no longer possible.
 
 #### Scenario: Normal call
 
 - **WHEN** the app calls the API while signed in
-- **THEN** the request carries `Authorization: Bearer <access token>`
+- **THEN** the request carries `Authorization: Bearer <ID token>`, which the edge validates
+  against this environment's user pool and app client
+
+#### Scenario: A handler needs to know who is calling
+
+- **WHEN** a handler records who did something, such as who published a rubric version
+- **THEN** it reads the email from the token's claims and refuses the call if there is none,
+  rather than writing an entry no person can attribute
 
 #### Scenario: Token about to expire
 
@@ -677,8 +754,9 @@ docs, not recalled:
 **Neither worker caches its prompt, and neither claims to.** The minimum cacheable prefix
 is 4,096 tokens on every current Claude model (Bedrock's table lists 1,024 only for older
 ones, such as Claude 3.7 Sonnet). The system prompt here is the rubric assembled from the
-rubric item's criteria plus the schema block — 3,936 characters against the `rubric.md` text
-those criteria are seeded from, roughly 1,000 tokens. That is a quarter of the minimum, so a
+rubric item's criteria and preamble plus the schema block — 3,936 characters as measured on
+`rubric.md`, the text the SJSU General version is published from, roughly 1,000 tokens. That is
+a quarter of the minimum, so a
 cache checkpoint would be accepted and then silently never used: the call still succeeds,
 the prefix just is not cached. A cache becomes worth building if the static prefix grows
 past 4,096 tokens — the questionnaire approach in `docs/architecture.md` would do it, a
@@ -725,8 +803,11 @@ rather than submitting a job that cannot run.
 
 A run SHALL be started for a scholarship, a year, and the rubric version it scores against.
 What it may take SHALL be decided by comparing that version with the version already stored on
-each application — nothing else. Publishing a rubric version SHALL NOT make any application
-claimable, because publishing writes to no application and starts no run.
+each application. A run MAY be given one narrowing scope — never scored, failed, or scored under
+a different version — which SHALL only cut that set down, never widen it, so that a trigger takes
+the work its label names and no more. Nothing else SHALL decide what a run may take. Publishing a
+rubric version SHALL NOT make any application claimable, because publishing writes to no
+application and starts no run.
 
 #### Scenario: A new rubric version is published
 
@@ -841,6 +922,12 @@ A worker SHALL move an item to `processing` with a write that succeeds only if t
 state has not changed since it was read. The claim SHALL record which run holds it and
 when the claim expires.
 
+A claim expiry SHALL NOT release an item on the batch path. A batch job is given 36 hours
+to finish — Bedrock will not accept a timeout under 24 — so any expiry short enough to
+rescue a dead Lambda is also short enough to release items a live job is still working on.
+On the batch path an item SHALL stay claimed until its job reaches a state it cannot leave,
+and the claim expiry SHALL be set past the job's 36 hours so a clock alone never frees it.
+
 #### Scenario: Two workers reach for the same item
 
 - **WHEN** two workers read the same unprocessed item and both try to claim it
@@ -852,10 +939,16 @@ when the claim expires.
 - **WHEN** a worker claims an item
 - **THEN** the item shows the claiming run's id and a claim expiry
 
-#### Scenario: Worker dies holding a claim
+#### Scenario: On-demand worker dies holding a claim
 
-- **WHEN** a claim's expiry passes and no score was written
+- **WHEN** an on-demand claim's expiry passes and no score was written
 - **THEN** the item becomes available again with its attempt count increased by one
+
+#### Scenario: A batch job outlives any sensible expiry
+
+- **WHEN** items are claimed for a batch job and hours pass with the job still running
+- **THEN** they stay claimed and no second run can take them, because only the job
+  finishing releases them
 
 #### Scenario: Worker nears its time limit
 
@@ -896,12 +989,27 @@ item with the application key as the record id, submit a single Bedrock batch jo
 match results back to items by record id. Its input and output SHALL be objects in the
 environment's bucket under their own prefixes, separate from anything a person downloads.
 
+A batch job takes hours and a Lambda gets fifteen minutes, so the batch worker SHALL run
+as two invocations of the same function: one that submits and returns, one that collects.
+Nothing SHALL poll and nothing SHALL wait. The collecting invocation SHALL be started by
+the model service's own job-state event, and SHALL be able to work out which cohort a job
+belongs to from the job itself — the event carries only the job's identifiers, so the
+worker SHALL read the job's input location back from the service and take the cohort from
+the key it wrote. A job SHALL be given a name and a request token that a resubmission
+cannot collide with.
+
 #### Scenario: Job is submitted
 
 - **WHEN** the batch worker has claimed a set of items
-- **THEN** one record per claimed item is written to the environment's bucket, and one
-  batch job is submitted pointing at that input and at an output location in the same
-  bucket
+- **THEN** one record per claimed item is written to the environment's bucket, one batch
+  job is submitted pointing at that input and at an output location in the same bucket,
+  and the invocation ends without waiting for the job
+
+#### Scenario: The claim names the job
+
+- **WHEN** a job has been submitted for a set of claimed items
+- **THEN** each item's claim holds that job's identifier, so a person reading one item can
+  see which job it is waiting on
 
 #### Scenario: The model service reads and writes the objects
 
@@ -909,17 +1017,53 @@ environment's bucket under their own prefixes, separate from anything a person d
 - **THEN** it reads its input and writes its output under a role that reaches only those
   prefixes in that environment's bucket, and no other bucket or prefix
 
+#### Scenario: The job finishing starts the collection
+
+- **WHEN** a batch job reaches a state it cannot leave
+- **THEN** the model service's job-state event starts a collecting invocation for that
+  job, and no schedule, poll, or sleep is used to notice the job finished
+
+#### Scenario: The collector works out which items are its own
+
+- **WHEN** a collecting invocation starts from a job-state event
+- **THEN** it finds its cohort from the job's own input location rather than from the
+  event, and reads only the claims that name that job
+
 #### Scenario: Results are matched back
 
 - **WHEN** the job's output is read
 - **THEN** each result is written to the item whose application key matches its record
   id
 
+#### Scenario: The counts are checked against the job's own tally
+
+- **WHEN** the output is read
+- **THEN** the job's record counts are compared against the number of items written, and a
+  disagreement is reported as a failed run rather than a quiet shortfall
+
+#### Scenario: Some records succeeded and some did not
+
+- **WHEN** a job finishes partly done
+- **THEN** the records that succeeded are scored and stored, and the rest are marked failed
+  with their reasons — one bad record SHALL NOT discard the job's good work
+
+#### Scenario: The job produced nothing
+
+- **WHEN** a job ends failed, stopped, or expired without usable output
+- **THEN** every item it held is released with its attempt count increased by one, the
+  reason is stored on the run, and the reviewer is told the job did not run rather than
+  being shown an empty result
+
 #### Scenario: Record missing from the output
 
 - **WHEN** a claimed item has no result in the job output
 - **THEN** that item is marked failed with a reason, not left claimed and not silently
   dropped
+
+#### Scenario: The same job is collected twice
+
+- **WHEN** a job-state event arrives for a job whose results were already collected
+- **THEN** the second collection changes nothing and reports that the job was already done
 
 #### Scenario: Too few items for a job
 
@@ -1015,19 +1159,21 @@ maximum. A reply with a finer value SHALL be a failure, not rounded.
 - **THEN** the item fails. Rounding it would be the check inventing a score the model did
   not give
 
-#### Scenario: A rubric version is published
+#### Scenario: A published rubric says nothing about half points
 
-- **WHEN** a rubric version is published
-- **THEN** its level descriptions allow half points on every criterion, including the 0–1
-  Extracurricular Activities criterion, and because the prompt is assembled from those
-  descriptions there is no second rubric text that could disagree with them
+- **WHEN** a published version's text does not mention half points
+- **THEN** the check still accepts a whole or half point and still refuses anything finer — the
+  step is a rule of the system, not of a published file. What the text decides is whether the
+  model is asked to use half points, and because the prompt is assembled from that same text
+  there is no second rubric text that could disagree with it
 
 ### Requirement: The rubric item is the only source of the criteria
 
 The prompt, the reply check, the weighted total, and the columns a screen shows SHALL all be
 built from the `criteria` list on the rubric item. No criterion id, name, maximum, weight, or
 level description SHALL be written into a worker, a handler, or the web app, and no rubric
-text file SHALL be read at run time.
+text file SHALL be read at run time — including the file a version was published from, which is
+kept as provenance and never sent to a model.
 
 #### Scenario: The prompt's rubric text is assembled
 
@@ -1036,12 +1182,12 @@ text file SHALL be read at run time.
   maxima, and level descriptions — so the text the model reads and the ranges the reply check
   enforces cannot disagree
 
-#### Scenario: A rubric version is written for the first time
+#### Scenario: The first rubric version for a scholarship
 
-- **WHEN** the first rubric version for a scholarship is created
-- **THEN** `rubric.md` is the source its criteria and level descriptions are seeded from, and
-  after that the rubric item is what the system reads — the file is a human-readable original,
-  not a second live copy
+- **WHEN** a scholarship's first rubric version is created
+- **THEN** it is published the way every later one is: a file uploaded on the dashboard, parsed
+  into criteria, weighted on screen, and written as a version. Nothing is seeded by hand, and
+  `rubric.md` is a file someone can upload rather than a file the system knows about
 
 #### Scenario: A scholarship uses a different set of criteria
 
@@ -1147,7 +1293,10 @@ working on it.
 
 _Next up. Run the API on AWS behind the phase-1 edge, and settle its route contract._
 
-TBD
+TBD, with two exceptions. Listing a scholarship's rubric versions and publishing one are
+settled here, because nothing can be scored until a version exists and publishing is the only
+way one gets there. Both are specified with the dashboard below, since that is where a person
+uses them. The rest of the route contract is still open.
 
 **Phase 4 — the screens.** The last phase, and the one that makes the work visible. With
 no reviewer loop built, these screens are the whole output. The work splits across the two
@@ -1155,21 +1304,28 @@ the web app already has, and one that stays shut:
 
 | Screen | Its job |
 | --- | --- |
-| Dashboard | A trigger section, and for now that is the whole screen: upload a workbook, every trigger, and progress. The reliability analysis already there is kept in the code, below it, untouched |
+| Dashboard | A trigger section, and for now that is the whole screen: upload a workbook, publish and pick a rubric, every trigger, and progress. The reliability analysis already there is kept in the code, below it, untouched |
 | Scholarships | Find an application, rank a cohort, read the per-criterion scores, export |
 | Reviews | Nothing yet. Sign-off is not built, so it is not offered |
 
 **The dashboard is where work gets in and where it starts.** For this phase the dashboard is a
-trigger section — the upload, the triggers, and the progress counts, and nothing else is built
-on it. The reliability analysis already on the screen is kept as it stands, below the trigger
-section; it is not rebuilt, and it is not deleted.
+trigger section — the two uploads, the version picker, the triggers, and the progress counts,
+and nothing else is built on it. The reliability analysis already on the screen is kept as it
+stands, below the trigger section; it is not rebuilt, and it is not deleted.
 
-The first is the upload. A person picks a workbook on the dashboard and it goes to the
+The first is the workbook upload. A person picks a workbook on the dashboard and it goes to the
 uploads prefix in the environment's bucket, where ingest picks it up. That is the only way an
 export gets into the system, and it is the only thing an upload triggers — the file landing
 does not start scoring.
 
-The second is the triggers. Scoring the unscored, recomputing a total after a weight change,
+The second is the rubric. A rubric arrives the same way an export does: someone uploads its
+text, weights are typed beside the criteria the parse found, and it is written as a version.
+Nothing is seeded and no file in the repo is special — `rubric.md` is the file you would upload
+first for the SJSU General five. A published version is never edited, because every stored total
+names the version whose weights made it, and the trigger section picks which published version a
+run is for. Publishing on its own moves no cohort.
+
+The third is the triggers. Scoring the unscored, recomputing a total after a weight change,
 rescoring what changed, and retrying what failed all start from a button here rather than
 from a schedule or the upload. That keeps a model bill from being run up by a file landing in
 a bucket, and it means the person who asked for the work is the person watching it. The
@@ -1389,6 +1545,90 @@ start scoring.
 - **WHEN** an export is uploaded again for a cohort that has already been scored
 - **THEN** the scores already stored survive it, as the ingest requirement in phase 3
   demands, and the screen says what the re-ingest changed
+
+### Requirement: A rubric version is published from the dashboard
+
+A person SHALL publish a rubric version by uploading its text on the dashboard. The text SHALL
+be parsed into criteria, the weights SHALL be typed on screen, and both SHALL be shown for
+checking before anything is written. A file that does not match the format SHALL be refused
+with the line that stopped it, and SHALL NOT be partly accepted or corrected on the way in. A
+published version SHALL NOT be editable — a correction is the next version. Publishing SHALL
+write to no application.
+
+#### Scenario: A rubric file is uploaded
+
+- **WHEN** a person uploads a rubric on the dashboard
+- **THEN** the screen shows every criterion parsed out of it with its maximum and its levels,
+  beside the file as it was uploaded, and nothing is published until they say so
+
+#### Scenario: The file does not match the format
+
+- **WHEN** an uploaded file has a criterion with no score range, a level above that criterion's
+  maximum, a level value finer than a half point, or two criteria whose names give the same id
+- **THEN** it is refused with the line that caused it and no version is written. There is no
+  partial parse and nothing is guessed at — the rule the reply check follows, for the same
+  reason: a maximum that was guessed would move every score under it without failing anything
+
+#### Scenario: Weights are supplied
+
+- **WHEN** the parsed criteria are shown
+- **THEN** a weight is typed for each one, the running total is on screen, and publishing stays
+  unavailable until they sum to 100. No weight is inferred from a maximum or read out of the file
+
+#### Scenario: A version is published
+
+- **WHEN** a person publishes the checked rubric
+- **THEN** it is written as the next version for that scholarship, carrying its criteria, its
+  preamble, the file it came from, and who published it and when — and the screen says which
+  version number it wrote
+
+#### Scenario: Two people publish at once
+
+- **WHEN** two people publish for the same scholarship at the same moment
+- **THEN** each publish writes its own version and neither overwrites the other, because the
+  write is conditional on that version number not already existing
+
+#### Scenario: A published version is opened again
+
+- **WHEN** a person opens a version that has already been published
+- **THEN** it is readable and not editable. Every stored total names the version whose weights
+  made it, so changing one in place would change what that name means for scores already written
+
+#### Scenario: Publishing does not move a cohort
+
+- **WHEN** a version is published
+- **THEN** no application is written, no total changes, and no ranked list moves. A cohort
+  reaches a new version only when someone starts a run for it
+
+#### Scenario: A scholarship with no cohort yet
+
+- **WHEN** a person wants to publish for a scholarship that has no applications
+- **THEN** it is not offered — the scholarships available to publish for are the ones with a
+  cohort, so its workbook is uploaded first
+
+### Requirement: A run is scored under a rubric version a person picked
+
+The dashboard's trigger section SHALL let a person pick which published rubric version a run is
+for, defaulting to the newest for the chosen scholarship. That pick SHALL be the version every
+trigger in the section runs for.
+
+#### Scenario: The picker's default
+
+- **WHEN** a person opens the trigger section for a scholarship
+- **THEN** its newest published version is picked, and every count beside a trigger is worked
+  out against that version
+
+#### Scenario: An older version is picked
+
+- **WHEN** a person picks a version that is not the newest
+- **THEN** the run is for that version — it claims the applications that do not already carry
+  it, and the totals it writes are stamped with it
+
+#### Scenario: No version has been published
+
+- **WHEN** a scholarship has no published rubric version
+- **THEN** the trigger section says so and offers no run, rather than starting one that fails
+  when it reaches the prompt
 
 ### Requirement: Every trigger lives on the dashboard
 

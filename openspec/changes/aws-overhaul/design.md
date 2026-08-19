@@ -19,16 +19,18 @@ See `proposal.md` — Why. The constraints that shape the design, and nothing el
 - **Two Lambdas exist as samples** in `lambdas/`, on branches rather than `main`. They show
   a working shape. The defect list in `proposal.md` is what must not be copied.
 - **The rubric weights and the rubric text have one home**: the `criteria` list on the rubric
-  item, which `rubric.md` seeds. Two weight copies are still in the tree
+  item, which a published version writes. Two weight copies are still in the tree
   (`apps/api/main.py:REVIEW_WEIGHTS` and the evaluation harness) and both go when their code
-  goes. `rubric.md` itself has no weights in it — only maxima and level descriptions.
+  goes. `rubric.md` is one file someone can upload, and it has no weights in it — only maxima
+  and level descriptions, which is why weights are typed at publish time.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
 - One CDK app that defines everything, deployable from nothing to a working environment.
-- One hostname per environment, so there is no CORS anywhere in the system.
+- One hostname per environment, so the API needs no CORS. The single exception is the
+  browser's PUT of a workbook straight to S3, which the bucket answers with one rule.
 - Scoring that cannot run without someone asking, cannot double-score an application, and
   cannot turn a truncated model reply into a real score.
 - Screens that read the pipeline honestly: part-scored looks part-scored, unreviewed says
@@ -49,44 +51,29 @@ See `proposal.md` — Why. The constraints that shape the design, and nothing el
 
 ### One CDK app, stacks split by lifecycle
 
-```mermaid
-flowchart TB
-    subgraph data["DataStack — outlives the others"]
-        table[(DynamoDB<br/>dev-scholarship)]
-        bucket[(S3<br/>dev bucket<br/>uploads · batch · analytics)]
-    end
+What talks to what is in the spec's Architecture section, and is not redrawn here. What this
+section decides is which stack a thing goes in, and that is a table:
 
-    subgraph edge["EdgeStack — the front door"]
-        pool[Cognito user pool<br/>+ hosted UI domain<br/>+ web app client]
-        site[(S3<br/>web build)]
-        cf[CloudFront]
-        api[API Gateway HTTP API<br/>JWT authorizer]
-    end
+| Stack | What is in it | On `cdk destroy` |
+| --- | --- | --- |
+| `DataStack` | the `<env>-scholarship` table and its `rank-by-total` index, the `<env>` bucket | `RETAIN` — the data survives |
+| `EdgeStack` | the user pool, hosted UI domain and app client; the site bucket; CloudFront and its `spa-rewrite` function; the HTTP API and JWT authorizer; `api-placeholder` | pool `RETAIN`, the rest goes |
+| `ComputeStack` | one Lambda per job: `rubric-versions`, `rubric-publish`, the remaining route handlers, `ingest-worker`, `score-ondemand`, `score-batch` | all of it goes |
 
-    subgraph compute["ComputeStack — phase 2 and 3"]
-        routes[Route handlers]
-        ondemand[Scoring worker]
-        batchw[Batch scoring worker]
-        ingestw[Ingest worker]
-    end
+Three stacks, split by how long the thing inside lives, not by phase. The data stores outlive
+every redeploy; the front door and the compute are replaceable. Phase 1 adds nothing to
+`ComputeStack` — it synthesises empty — while phases 2 and 3 both fill it. A phase is a unit of
+work, not a unit of deployment.
 
-    cf -->|default| site
-    cf -->|/api/*| api
-    api --> routes
-    pool -.->|verifies| api
-    cf -.->|its domain is the callback| pool
-    routes --> table
-    routes --> bucket
-    ingestw --> table
-    ondemand --> table
-    batchw --> table
-    batchw --> bucket
-```
+Every Lambda in `ComputeStack` is its own function with its own IAM policy: a handler gets the
+table, a worker gets the table plus the prefixes it uses and the model it calls. The two rubric
+handlers are named because they are settled and land first — nothing can be scored before a
+version is published. The rest of phase 2's route contract is open, so it is one row and not
+five guesses.
 
-Three stacks, split by how long the thing inside lives, not by phase. The data stores
-outlive every redeploy and carry `RETAIN`; the front door and the compute are replaceable.
-Phase 1 adds nothing to `ComputeStack` — it synthesises empty — while phases 2 and 3 both
-fill it. A phase is a unit of work, not a unit of deployment.
+`api-placeholder` is the one Lambda deployed today, and it is in `EdgeStack` rather than
+`ComputeStack` on purpose: it exists to prove the token check and the `/api/*` behaviour work,
+so it belongs to the front door and goes when the real routes arrive.
 
 **The user pool is in `EdgeStack`, because sign-in and the front door are the same
 deployment.** The app client's callback URL is the CloudFront domain, and the JWT authorizer
@@ -112,12 +99,55 @@ CloudFront has two behaviours: the default serves the web build from a private S
 through origin access control, and `/api/*` forwards to the API Gateway. `Authorization`
 is forwarded; nothing under `/api/` is cached.
 
-This removes CORS from the system rather than configuring it. There are no preflights, no
+This takes CORS off the API rather than configuring it. No preflight on any call, no
 allow-list to keep in sync with a new environment, and the web app calls relative paths so
 it needs no API base URL at build time.
 
 *Alternative — a separate API domain with CORS.* One more certificate, one more DNS name,
 and a preflight on every non-GET. Nothing gained for an internal app.
+
+### The one cross-origin request is the upload, and the bucket answers it
+
+A workbook goes from the browser to the bucket with a presigned PUT, so a few thousand rows
+never pass through a Lambda. That URL is on the bucket's own hostname, and a PUT is never a
+simple request, so the browser preflights it — and S3 answers a preflight only if the bucket
+carries a CORS rule. So it carries exactly one: `PUT` alone, origins the environment's
+CloudFront domain and the Vite dev server, nothing else. The API keeps none.
+
+The rule needs the distribution's domain, which is only known once the distribution exists,
+so the environment bucket reads it from the edge stack. That is the one place the long-lived
+stack depends on a replaceable one, and it is a name, not a resource.
+
+*Alternative — POST the file to a Lambda that writes it to the bucket.* Same origin, no rule
+to add. Refused because API Gateway caps a request at 6 MB and a binary body is base64 on the
+way in, so the real ceiling is about 4.5 MB — the size class of the intake we already have,
+and a limit nobody can raise.
+
+*Alternative — a `/uploads/` behaviour on the distribution.* Keeps the PUT same-origin, but a
+presigned S3 URL signs the S3 hostname, so it cannot be used through CloudFront. It would take
+CloudFront signed URLs, a key group, a public key in the stack, and an OAC that permits writes.
+
+### The API is called with the ID token, not the access token
+
+Publishing a rubric version records who published it, and that has to be readable by a person.
+A Cognito access token carries `sub`, `username`, `scope`, and `client_id` — no email. The ID
+token carries the email, and the API Gateway JWT authorizer validates either one against the
+same pool and app client, so the app sends the ID token.
+
+*Alternative — keep the access token and add the email to it.* A pre-token-generation trigger
+can do it, but access-token customization needs the user pool on the Essentials tier, which is
+a monthly bill for one claim.
+
+*Alternative — record the subject instead.* Nothing to change anywhere, and `published_by`
+becomes a UUID, which is provenance nobody can use.
+
+### A trigger takes only the work it names
+
+Scope starts from the rubric version: an application whose stored version already matches is
+not work. Within that, each of the four dashboard triggers narrows further to the state it
+names — never scored, failed, or scored under a different version — because a button labelled
+"retry failed" that also scores the unscored is a button that lies. The narrowing is a filter
+the run is given; it cannot widen the version comparison, only cut it down.
 
 ### Deep links are rewritten at the viewer, not mapped from an S3 error
 
@@ -221,9 +251,17 @@ A worker conditionally writes `claimed_by` and `claimed_until` on an application
 `status` is not `processing`, and only scores what the write succeeded on. The claim
 expires, so a worker that dies mid-run releases its work instead of parking it forever.
 
-`claimed_by` holds a run id on the on-demand path and the Bedrock batch job identifier on
-the batch path. That is why a run needs no record of its own: polling a submitted batch job
-is a read of any claimed item in the cohort.
+`claimed_by` holds a run id on the on-demand path and the Bedrock batch job's name on the
+batch path. That is why a run needs no record of its own: the state of a submitted job is a
+read of any claimed item in the cohort.
+
+**The expiry only guards the on-demand path.** A batch job is submitted with a 36-hour
+timeout, and Bedrock refuses anything under 24, so there is no expiry that both rescues a
+dead Lambda in minutes and leaves a live job alone for a day and a half. The batch claim's
+expiry is therefore set past 36 hours and does nothing useful; what actually releases a
+batch item is the job reaching a terminal state. Without that split, a second run would steal
+items out from under a running job — scoring them twice, and then having the collector
+overwrite the newer scores with the older job's output.
 
 *Alternative — SQS with a visibility timeout.* The right tool if work arrived
 continuously. It does not: work arrives when a person presses a button, and the queue would
@@ -251,12 +289,51 @@ asks for JSON in the prompt instead of forcing a tool call. It *can* take `Conve
 input (`modelInvocationType`), which is what lets both workers share one prompt builder and
 one reply check rather than maintaining two shapes that drift apart.
 
+### The batch job's own event starts the collector
+
+`score-batch` is one function with two entry points: an invocation that submits and returns,
+and an invocation that reads the output. Nothing polls. A Lambda caps at 15 minutes and the
+job is given 36 hours, so waiting inside the invocation is not an option, and a schedule
+would mean either a slow pickup or a lot of empty runs.
+
+The trigger is an EventBridge rule on `source: aws.bedrock`, `detail-type: "Batch Inference
+Job State Change"`, narrowed to the terminal statuses — `Completed`, `PartiallyCompleted`,
+`Failed`, `Stopped`, `Expired`. Only the first two can carry results; the other three release
+the claims with the reason recorded.
+
+**Finding the cohort is the awkward part.** The event carries `detail.batchJobArn` and
+`detail.batchJobName` and nothing about applications. There is no index on `claimed_by`, so a
+job identifier alone gives a Query no partition to read. The job name would be the obvious
+carrier and is not usable: 63 characters, no spaces, `[a-zA-Z0-9]` with limited punctuation,
+while a scholarship name is raw text off a spreadsheet sheet tab. So the collector calls
+`GetModelInvocationJob` and takes the cohort out of `inputDataConfig.s3InputDataConfig.s3Uri`
+— the worker chose that key when it submitted, so the key is where the cohort is written down.
+The job name stays human-readable-ish for the console, and `clientRequestToken` keeps a
+retried submission from creating a second job.
+
+**Reading the output.** Bedrock writes into a folder named for the job id under the configured
+output URI: one `.jsonl.out` per input file, whose lines are `{recordId, modelInput,
+modelOutput}` with `error` in place of `modelOutput` for a record that failed, plus a
+`manifest.json.out` carrying `totalRecordCount`, `processedRecordCount`, `successRecordCount`,
+and `errorRecordCount`. The manifest is a free reconciliation check: if the items written do
+not match its counts, the run is reported failed rather than looking complete. Collecting the
+same job twice is harmless because the writes are keyed by application and conditional on the
+claim still naming that job.
+
+**`batch/` gets a lifecycle rule.** `modelInput` is echoed into every output record, so the
+bucket ends up holding two copies of each applicant's essays — in a versioned bucket set to
+`RETAIN`, forever. The objects are only needed while a run can still be looked into, so they
+expire, non-current versions included.
+
 ### No prompt caching, on either path
 
-The static part of the prompt — `rubric.md` plus the schema block — is 3,936 characters,
-about 1,000 tokens. The minimum cacheable prefix is **4,096 tokens on every current Claude
-model**; the 1,024 figure in Bedrock's table belongs to older ones like Claude 3.7 Sonnet.
-A quarter of the minimum is not a near miss, so caching is dropped rather than deferred.
+The static part of the prompt — the assembled rubric plus the schema block — is 3,936
+characters, about 1,000 tokens, measured on `rubric.md`, the text the SJSU General version is
+published from. The minimum cacheable prefix is **4,096 tokens on every current Claude model**;
+the 1,024 figure in Bedrock's table belongs to older ones like Claude 3.7 Sonnet. A quarter of
+the minimum is not a near miss, so caching is dropped rather than deferred. A much longer rubric
+could be published later and cross the line, which the spec covers as a scenario rather than
+something to build for now.
 
 The measurement is an estimate from character count — `ANTHROPIC_API_KEY` is not set here,
 so the token-counting endpoint was not called. It does not need to be: at 3.6 characters per
@@ -289,10 +366,16 @@ failure clears the derived fields it invalidates.
 Retries feed the error back into the next attempt. Three identical calls at
 `temperature: 0` cost three times as much and return the same reply.
 
+A reply that ran into the output token limit is told apart from a malformed one by the model's
+own `stopReason`, not by inspecting the text. The reply carries the answer already: guessing at
+it from unbalanced brackets both mislabels ordinary bad JSON and misses a reply that stopped at
+the limit on a boundary that happens to parse.
+
 ### Phase 4: the dashboard is a trigger section, and the rest is left alone
 
-For this phase the dashboard is one thing: the trigger section — upload, the four triggers,
-and progress. That is what gets built. The reliability sections already on the screen — the
+For this phase the dashboard is one thing: the trigger section — the workbook upload, the rubric
+panel and its version picker, the four triggers, and progress. That is what gets built. The
+reliability sections already on the screen — the
 human-versus-human against AI-versus-human comparison, the reviewer distribution, and the
 per-criterion and per-scholarship breakdowns — are kept where they are, below it, and are not
 rebuilt. They are a different feature waiting on last year's reader scores, which IT has not
@@ -424,16 +507,16 @@ read the `criteria` list on the rubric item. No criterion id, name, maximum, or 
 written into a worker, a handler, or the web app.
 
 **That includes the rubric text itself.** The prompt's rubric section is assembled from the
-criteria — names, maxima, and level descriptions — not read from a file at run time.
-`rubric.md` is where the first version's criteria are seeded from, and after that it is a
-human-readable original rather than a live input. Sending the file while ranges came from the
-item would put the maxima in two places, which is the same drift we removed from the weights:
-the file says a criterion is out of 4, the item says 3, and the model and the range check
-disagree without either being obviously wrong.
+criteria and the preamble — names, maxima, level descriptions, and the rubric's own grading
+instructions — not read from a file at run time. The file a version was published from is kept
+on the item as provenance and never sent to a model. Sending it while the ranges came from the
+criteria would put the maxima in two places, which is the same drift we removed from the
+weights: the file says a criterion is out of 4, the item says 3, and the model and the range
+check disagree without either being obviously wrong.
 
-*Alternative — send `rubric.md` and keep only ids, maxima, and weights on the item.* One less
-assembly step, and the level text stops being data: a scholarship with different criteria then
-needs a new file in the repo, and the maxima exist twice. Rejected.
+*Alternative — send the uploaded file and keep only ids, maxima, and weights on the item.* One
+less assembly step, and the level text stops being data: a scholarship with different criteria
+then needs its file kept somewhere the worker can read, and the maxima exist twice. Rejected.
 
 We just removed three copies of the weight table. Hardcoding the five criteria in the
 frontend and the prompt would put two of them straight back — the frontend copy being the
@@ -447,6 +530,51 @@ the total at once, because none of them has its own version of it.
 AI-detection gate, which is `human-in-the-loop` and deferred, and for a computed criterion,
 which nothing asks for. `criteria` is a list of maps, so adding the field later is a field,
 not a migration. Every criterion today is scored, weighted, and model-judged.
+
+### Rubrics are published from the dashboard, and nothing is seeded
+
+A rubric arrives one way: someone uploads its text on the dashboard, types a weight beside each
+criterion the parse found, checks what came out, and publishes it as a version. There is no
+seeded first item and no file the system treats as special. `rubric.md` is the file you would
+upload first.
+
+**The parse is strict and refuses rather than guesses.** A criterion opens with
+`Category: <name> (0-<max>)`; a level is `- <value> = <text>`; `===` fenced blocks and the text
+before the first criterion are the rubric's preamble; other prose inside a block is that
+criterion's guidance. That is `rubric.md`'s own shape, so the format describes what the
+committee already writes rather than adding something to learn. A file that does not match is
+refused with the line that stopped it.
+
+The strictness is the point. A maximum drives the prompt, the range check, and how much that
+criterion is worth in the total, so a parser that guessed one would move scores without failing
+anything — the sample's JSON repair, which turned a truncated reply into a low score, is the
+same mistake one layer down. The preview is the second guard: a person reads the maxima and
+levels that came out before a version exists.
+
+*Alternative — upload the criteria as JSON.* Nothing to parse and nothing to guess, and it makes
+publishing a rubric a programming task. The people who set a rubric write prose. Rejected.
+
+*Alternative — parse leniently and let the preview catch the mistakes.* The preview is a person
+reading five criteria carefully, which is exactly the check that erodes once it has passed a few
+times. Rejected.
+
+**Weights are typed, not parsed.** `rubric.md` has none, and inventing a syntax for them gives
+a file that can disagree with itself. They are a policy number the committee sets, so they are
+entered per criterion and refused unless they sum to 100.
+
+**A published version is immutable.** Every stored total names the version whose weights made
+it, so editing one in place would change what that name means for scores already written. A
+correction is the next version. The write is conditional on the version number not existing, so
+two people publishing at once get two versions rather than one silently overwriting the other.
+
+**Publishing records who did it, and that is not an access check.** `published_by` is the email
+claim off the API Gateway event. The access decision above — nothing behind the authorizer
+decides anything from who the caller is — still holds: this reads the caller for provenance, and
+everyone with an account may publish.
+
+**Nothing can be scored until a version is published**, which is why the two rubric routes are
+phase 2's first settled routes rather than phase 4 work beside the screen. The workers in phase 3
+read a rubric item; the route that writes one has to come before them.
 
 ### The review screen stays shut
 
@@ -493,8 +621,15 @@ settle.
 - **A new rubric version could look like it invalidated every stored total.** It doesn't:
   publishing writes to no application, so every total keeps the version that made it and every
   ranked list stays where it was. A cohort only moves when someone starts a run for the new
-  version. → Who may publish, and how, is phase 2's to settle. Until then a version is written
-  by hand and a run is how a cohort catches up.
+  version. → Who may publish, and how, is settled: anyone with an account, by uploading the
+  rubric on the dashboard. A run is how a cohort catches up.
+
+- **A published rubric can be wrong in ways nothing here can check.** Weights that sum to 100
+  and levels inside their maxima say the file is well formed, not that the rubric is sound — a
+  criterion can be worth 40% of the total on a two-line description and nothing will object. →
+  The screen shows what was parsed and what each criterion will be worth before a version
+  exists, and says plainly that it checked the shape and not the judgement. Whether a rubric is
+  the right rubric is the committee's call, and no screen implies otherwise.
 
 - **CloudFront invalidation is eventually consistent.** A deploy that uploads new assets
   and invalidates can serve a stale `index.html` against new hashed chunks for a few
@@ -520,12 +655,12 @@ Deploy order, once per environment:
 1. `cdk bootstrap` — one time, in `dxhub-automation`.
 2. `DataStack`, then `EdgeStack`. Data first because everything else references it.
 3. Create the first user in the pool by hand. There is no public sign-up.
-4. Write the first rubric item — `RUBRIC#sjsu_general` / `V#v1`, its criteria seeded from
-   `rubric.md` and its weights from the table those five criteria have always used. Nothing
-   can be scored before this exists, because the prompt, the range check, and the total are
-   all built from it.
-5. Build the web app with the pool id and sign-in domain, upload, invalidate.
-6. Upload a workbook from the dashboard, then press the scoring button.
+4. Build the web app with the pool id and sign-in domain, upload, invalidate.
+5. Upload a workbook from the dashboard, so the scholarship has a cohort.
+6. Publish the first rubric version from the dashboard — `rubric.md` uploaded, weights
+   10/40/30/10/10 typed in. Nothing can be scored before a version exists, because the prompt,
+   the range check, and the total are all built from it.
+7. Press the scoring button.
 
 **Rollback.** Redeploy the previous `EdgeStack` and `ComputeStack`; both are replaceable.
 `DataStack` is not rolled back — it carries `RETAIN` and holds the only copy of the data. A

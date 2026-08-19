@@ -22,7 +22,7 @@ detail when we reach it.
 | Phase | Scope | State |
 | --- | --- | --- |
 | 1. Front door | CDK app, CloudFront + S3 hosting, Cognito user pool, API Gateway with a JWT authorizer, the `dev` data stores | Written |
-| 2. API compute | Lambda handlers on boto3 behind the phase-1 API Gateway — no web framework; settle the route contract | Next |
+| 2. API compute | Lambda handlers on boto3 behind the phase-1 API Gateway — no web framework; settle the route contract. Its first two routes are settled here: list a scholarship's rubric versions, and publish one | Next |
 | 3. Scoring workers | Two Lambdas that score unprocessed applications — one on-demand, one through Bedrock batch | Written |
 | 4. The screens | The output: a dashboard that starts the work, and a scholarships screen that searches a cohort, ranks it by score, and reads the per-criterion scores | Written |
 
@@ -54,7 +54,7 @@ phase's section is written when the phase comes up.
 - Serve the API through the same CloudFront distribution as the app, under `/api/`, so
   there is one hostname per environment and no cross-origin calls at all. The
   distribution forwards `Authorization` and caches nothing under `/api/`.
-- Create the `dev` DynamoDB table and the analytics S3 bucket. They start empty, and they
+- Create the `dev` DynamoDB table and the `dev` S3 bucket. They start empty, and they
   are the only copies — CDK defines them from nothing, with no import step.
 - **One table per environment, not one table per entity.** Applications, scores, and
   rubrics live in `dev-scholarship` together, told apart by a prefix in the partition key.
@@ -105,13 +105,20 @@ The web app already has three screens. Phase 4 gives each one its job under the 
 
 | Screen | Its job in phase 4 | Where it came from |
 | --- | --- | --- |
-| Dashboard | A trigger section, and for now that is all: upload a workbook, every Lambda trigger, progress. The reliability analysis is kept in the code below it, not rebuilt | Built as a read-only reliability argument off last year's human scores. That argument is kept — it is waiting on data, not wrong — and the trigger section is added above it |
+| Dashboard | A trigger section, and for now that is all: upload a workbook, publish and pick a rubric, every Lambda trigger, progress. The reliability analysis is kept in the code below it, not rebuilt | Built as a read-only reliability argument off last year's human scores. That argument is kept — it is waiting on data, not wrong — and the trigger section is added above it |
 | Scholarships | Search a cohort, rank it by score highest or lowest, read the per-criterion scores, export | Already the ranked-list screen with a filter panel on top. Same job; the filter panel is extended into the advanced search |
 | Reviews | Nothing yet. It says sign-off is not built | Built as the human-review queue with tiebreaker submission — exactly the capability we deferred |
 
 - **The dashboard carries the upload.** A person picks a workbook there and it lands in the
   uploads prefix, where ingest reads it. That is the only way an export gets in, and the only
   thing the upload sets off — the file landing does not start scoring.
+- **The dashboard carries the rubric.** A person uploads a rubric's text there, types a weight
+  beside each criterion the parse found, checks what came out, and publishes it as a version.
+  The trigger section picks which published version a run is for, defaulting to the newest.
+  Nothing is seeded and no file in the repo is special — `rubric.md` is the file you would
+  upload first. A published version is never edited; a correction is the next version, because
+  every stored total names the version whose weights made it. The two routes behind this are
+  phase 2's first, since nothing can be scored until a version exists.
 - **The dashboard carries the triggers.** Score the unscored, recompute totals after a weight
   change, rescore what changed, retry what failed — each scoped to a scholarship and year, and
   nowhere else in the app starts any of them. Progress is read off the applications themselves:
@@ -276,22 +283,23 @@ What must not carry over. Each of these is covered by a requirement in the spec:
 on `availability_id` while every handler keys on `application_key`. The CDK app replaces
 it rather than porting it.
 
-**Two rubric texts, and `rubric.md` wins — as the seed, not as a run-time input.**
+**Two rubric texts, and `rubric.md` is the one to publish.**
 `rubric.md` at the repo root and `lambdas/score-applications/sjsu_general_rubric.md` cover the
 same five criteria with the same maxima. One difference changes scores: `rubric.md` presses for
 half points ("expected and encouraged"), adds a 0.5 level to Extracurricular Activities, and
 says so six times, while the Lambda's rubric never mentions them. `validate` accepts floats
 either way, so both run and nobody notices which one is loaded.
 
-Neither file is read at run time. `rubric.md` is where the first rubric version's criteria and
-level descriptions are seeded from, and the prompt is assembled from the rubric item after
-that. A file sent to the model while the ranges came from the item would put the maxima in two
-places — the same drift we removed from the weights, in a place where the model and the reply
-check would disagree quietly.
+Neither file is read at run time, and neither is seeded. A rubric version is published from the
+dashboard, and `rubric.md` is the file to upload for the SJSU General five — an input, not a part
+of the system. The prompt is assembled from the published version's criteria and preamble. The
+uploaded file is kept beside them as provenance and never sent to a model: a file the model read
+while the ranges came from the criteria would put the maxima in two places — the same drift we
+removed from the weights, in a place where the model and the reply check would disagree quietly.
 
-**Half points are allowed, on every criterion.** `rubric.md`'s level text is what the rubric
-item carries, so half points are in the prompt the worker assembles; the Lambda's copy goes
-with the sample. A score is a whole or half point up to its
+**Half points are allowed, on every criterion.** `rubric.md`'s level text is what the first
+published version carries, so half points are in the prompt the worker assembles; the Lambda's
+copy goes with the sample. A score is a whole or half point up to its
 criterion's maximum, and the reply check enforces that step — a reply of 3.7 fails rather
 than being rounded, because rounding is the check inventing a score the model did not give.
 On the 0–1 criterion at 10% weight, that step is worth 5 out of 100, which is the reason it
@@ -305,12 +313,14 @@ frontend would put back the duplication we just removed, in the place it drifts 
 A scholarship whose criteria are not the SJSU General five is then a rubric item, not a code
 change. No `kind` field on a criterion — it would be for the AI-detection gate, which is
 deferred, and `criteria` is a list of maps so adding it later is a field, not a migration.
-What is left for phase 2 is who may publish a new rubric version and how. Publishing on its
-own changes nothing that is already scored — the version a total was made under is stored on
+Who may publish a version and how is settled: anyone with an account, by uploading the rubric on
+the dashboard, with the weights typed on screen and refused unless they sum to 100. Publishing on
+its own changes nothing that is already scored — the version a total was made under is stored on
 the application, so a new version only reaches a cohort when someone starts a run for it.
 
-**On caching — dropped, because the prompt is too small.** The system prompt is `rubric.md`
-plus the schema block: 3,936 characters, about 1,000 tokens. The minimum cacheable prefix is
+**On caching — dropped, because the prompt is too small.** The system prompt is the assembled
+rubric plus the schema block: 3,936 characters as measured on `rubric.md`, about 1,000 tokens.
+The minimum cacheable prefix is
 4,096 tokens on every current Claude model, so a cache would never engage. The count is
 estimated from characters, not measured — there is no API key here — but a 4× margin makes
 that good enough to decide on.
@@ -364,7 +374,8 @@ None — this is the first spec in the repo.
   handler locally means calling it with a test event, not starting a server.
 - **Runtime dependencies**: the API and scoring handlers need boto3 only, which the
   Lambda runtime already provides. The parser needs `openpyxl` to read a workbook, so
-  that one Lambda ships a bundle or a layer. Nothing else is added to the Python side —
+  that one Lambda ships a bundle or a layer. The rubric parser is standard library only — it
+  reads plain text, so no markdown library is added. Nothing else is added to the Python side —
   in particular not `pandas`.
 - **AWS**: new resources in the `dxhub-automation` account — S3, CloudFront, Cognito,
   API Gateway, DynamoDB. Requires a one-time `cdk bootstrap`. Nothing is imported: the
