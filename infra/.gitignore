@@ -3,3 +3,4 @@ dist/
 *.js
 *.d.ts
 !cdk.json
+cdk-outputs.json
