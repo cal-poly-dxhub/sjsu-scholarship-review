@@ -9,9 +9,9 @@ materials/
 *.csv
 *.xlsx
 
-# personal project notes + local claude settings (holds api keys) — local only
+# personal project notes + local claude config (agents, skills, api keys) — local only
 CLAUDE.local.md
-.claude/settings.local.json
+.claude/
 
 # node / monorepo build junk
 node_modules/
