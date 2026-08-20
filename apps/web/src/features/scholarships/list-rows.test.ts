@@ -17,6 +17,8 @@ function app(student: string, extra: Partial<ListApplication> = {}): ListApplica
     major: "Computer Science",
     gpa: 3.75,
     total_score: 80,
+    rubric_version: "v1",
+    claimed_until: null,
     ...extra,
   };
 }
@@ -25,6 +27,12 @@ const SCORED_HIGH = app("aaa-high", { total_score: 90 });
 const SCORED_LOW = app("aaa-low", { total_score: 60 });
 const UNSCORED = app("aaa-unscored", { status: "parsed", total_score: null });
 const FAILED = app("aaa-failed", { status: "score_failed", total_score: null });
+// Scored, then the applicant's answers changed: ingest keeps the total and takes the version off.
+const SUPERSEDED = app("aaa-changed", {
+  status: "parsed",
+  total_score: 95,
+  rubric_version: null,
+});
 
 const COHORT = [SCORED_LOW, UNSCORED, FAILED, SCORED_HIGH];
 // What the index returns: only the two with a comparable total, highest first.
@@ -66,6 +74,20 @@ describe("listRows", () => {
   it("leaves an application out when a range it has no number for is set", () => {
     // A missing total passing a bound would rank an unscored applicant among the scored ones.
     const { rows: shown } = rows(false, "", { ...EMPTY_FILTERS, totalMin: "70" });
+
+    expect(shown.map((row) => row.student_uuid)).toEqual(["aaa-high"]);
+  });
+
+  it("does not match a totals range against a score the content has moved past", () => {
+    // 95 is stored, but it was made from answers this application no longer holds — the list
+    // shows no number for it, so a range must not find one either.
+    const { rows: shown } = listRows({
+      ranking: false,
+      search: "",
+      filters: { ...EMPTY_FILTERS, totalMin: "70" },
+      cohort: [...COHORT, SUPERSEDED],
+      ranked: RANKED,
+    });
 
     expect(shown.map((row) => row.student_uuid)).toEqual(["aaa-high"]);
   });

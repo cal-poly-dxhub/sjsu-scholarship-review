@@ -17,6 +17,7 @@ import { TableEmptyOverlay } from "@/sjsu/components/table-empty-overlay";
 import { useTableSort } from "@/sjsu/lib/use-table-sort";
 import { cohortExport, download, fetchReasoning, reasoningBatches } from "./export";
 import { EMPTY_FILTERS, isFiltering, listRows } from "./list-rows";
+import { STATE_LABELS, hasCurrentScore, scoreState } from "./score-state";
 
 /** One score on the application's own copy of the numbers. The reasoning lives on the score item. */
 interface CriterionScore {
@@ -427,39 +428,44 @@ export function ApplicationsList({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {shown.map((app, index) => (
-              <TableRow
-                key={app.sk}
-                className="cursor-pointer"
-                onClick={() => onSelectApp(app.student_uuid)}
-              >
-                <TableCell className="text-muted-foreground">{firstOnPage + index + 1}</TableCell>
-                <TableCell className="font-mono text-xs">{app.student_uuid.slice(0, 8)}…</TableCell>
-                <TableCell className="truncate">{app.academic_program ?? "—"}</TableCell>
-                <TableCell className="truncate">{app.academic_level ?? "—"}</TableCell>
-                <TableCell className="truncate">{app.major ?? "—"}</TableCell>
-                <TableCell className="tabular-nums">{app.gpa ?? "—"}</TableCell>
-                <TableCell className="tabular-nums font-medium">
-                  {app.total_score ?? "—"}
-                  {app.total_score !== null && (
-                    <Badge variant="outline" className="ml-2">
-                      unreviewed
-                    </Badge>
-                  )}
-                </TableCell>
-                {criteria.map((criterion) => {
-                  const score = app.category_scores?.[criterion.id];
-                  return (
-                    <TableCell key={criterion.id} className="tabular-nums">
-                      {score ? `${score.score}/${score.max}` : "—"}
-                    </TableCell>
-                  );
-                })}
-                <TableCell>
-                  <StateBadge app={app} />
-                </TableCell>
-              </TableRow>
-            ))}
+            {shown.map((app, index) => {
+              // Only a current score is shown as a number. A superseded one is behind its state,
+              // and the detail screen is where it can still be read.
+              const current = hasCurrentScore(app);
+              return (
+                <TableRow
+                  key={app.sk}
+                  className="cursor-pointer"
+                  onClick={() => onSelectApp(app.student_uuid)}
+                >
+                  <TableCell className="text-muted-foreground">{firstOnPage + index + 1}</TableCell>
+                  <TableCell className="font-mono text-xs">{app.student_uuid.slice(0, 8)}…</TableCell>
+                  <TableCell className="truncate">{app.academic_program ?? "—"}</TableCell>
+                  <TableCell className="truncate">{app.academic_level ?? "—"}</TableCell>
+                  <TableCell className="truncate">{app.major ?? "—"}</TableCell>
+                  <TableCell className="tabular-nums">{app.gpa ?? "—"}</TableCell>
+                  <TableCell className="tabular-nums font-medium">
+                    {current ? app.total_score : "—"}
+                    {current && (
+                      <Badge variant="outline" className="ml-2">
+                        unreviewed
+                      </Badge>
+                    )}
+                  </TableCell>
+                  {criteria.map((criterion) => {
+                    const score = current ? app.category_scores?.[criterion.id] : undefined;
+                    return (
+                      <TableCell key={criterion.id} className="tabular-nums">
+                        {score ? `${score.score}/${score.max}` : "—"}
+                      </TableCell>
+                    );
+                  })}
+                  <TableCell>
+                    <StateBadge app={app} />
+                  </TableCell>
+                </TableRow>
+              );
+            })}
           </TableBody>
         </Table>
       </EmptyState>
@@ -488,13 +494,14 @@ export function ApplicationsList({
 }
 
 function StateBadge({ app }: { app: Application }) {
-  if (app.status === "score_failed") return <Badge variant="warning">failed</Badge>;
-  // An expired claim is work again, whatever the status still says.
-  if (app.status === "processing" && (app.claimed_until ?? "") > new Date().toISOString()) {
-    return <Badge variant="secondary">running</Badge>;
+  const state = scoreState(app);
+  if (state === "scored") return <Badge variant="secondary">{app.rubric_version}</Badge>;
+  if (state === "failed" || state === "needs_rescore") {
+    return <Badge variant="warning">{STATE_LABELS[state]}</Badge>;
   }
-  if (app.total_score === null) return <Badge variant="outline">unscored</Badge>;
-  return <Badge variant="secondary">{app.rubric_version ?? "scored"}</Badge>;
+  return (
+    <Badge variant={state === "running" ? "secondary" : "outline"}>{STATE_LABELS[state]}</Badge>
+  );
 }
 
 function Paging({

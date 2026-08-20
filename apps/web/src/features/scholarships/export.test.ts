@@ -64,6 +64,11 @@ const FAILED = scored("three", {
   failure: "the reply was missing a criterion",
 });
 
+// Ingest kept the total and took the version off, because the answers changed under it.
+const CHANGED = scored("four", { status: "parsed", rubric_version: null });
+
+const RUNNING = scored("five", { status: "processing", claimed_until: "2099-01-01T00:00:00Z" });
+
 const REASONING: Record<string, ScoreItem | null> = {
   one: {
     category_scores: {
@@ -127,6 +132,17 @@ describe("cohortExport", () => {
     expect(rowAt(rows, 2).failure).toBe("the reply was missing a criterion");
     // A criterion with no score still names its weight, so a zero is never read into a blank.
     expect(rowAt(rows, 1).criteria.map((criterion) => criterion.weight)).toEqual([40, 60]);
+  });
+
+  it("says a total is not current rather than exporting it as a score", () => {
+    // A row read as 'scored' is a number someone sorts and decides on. These two are not scores:
+    // one was made from answers that have since changed, the other is being replaced right now.
+    const rows = build(undefined, [CHANGED, RUNNING]).applications;
+
+    expect(rows.map((row) => row.state)).toEqual(["needs_rescore", "running"]);
+    // The number stays in the file, because the warning above names it as the previous score.
+    expect(rowAt(rows, 0).total_score).toBe(80);
+    expect(build().warnings.join(" ")).toContain("not a current one");
   });
 
   it("carries reasoning only when it was asked for", () => {

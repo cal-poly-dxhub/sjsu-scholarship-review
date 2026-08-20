@@ -8,7 +8,7 @@ from typing import Any
 from shared.table import cohort_pk, rank_pk, rubric_pk, rubric_sk, to_dynamo
 
 SCHOLARSHIP = "sjsu-general"
-YEAR = "2026"
+YEAR = "2025-2026"
 
 
 def stamp(minutes: int = 0) -> str:

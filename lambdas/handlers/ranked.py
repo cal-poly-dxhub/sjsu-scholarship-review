@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from shared.http import BadRequest, query_param, reply
+from shared.http import BadRequest, query_param, reply, year_of
 from shared.reads import PAGE, CursorError, ranked
 
 log = logging.getLogger()
@@ -23,7 +23,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
     params = event.get("queryStringParameters") or {}
     try:
         scholarship = query_param(event, "scholarship")
-        year = query_param(event, "year")
+        year = year_of(query_param(event, "year"))
         version = query_param(event, "rubric_version")
         highest_first = direction_of(params.get("direction", "highest"))
         limit = limit_of(params.get("limit"))

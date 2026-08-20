@@ -128,7 +128,7 @@ prefix and the batch job permissions. They share the prompt builder and the repl
 the same input gives the same score either way. `score-batch` has one box but two ways in:
 a person starts the submit, and the job's own event starts the collect.
 
-**Where the two diagrams touch, besides the table.** The workbook that lands in `uploads/` and
+**Where the two diagrams touch, besides the table.** The export that lands in `uploads/` and
 the button that starts a run both arrive through the front door in the first diagram, and the
 route for either one is inside `the remaining handlers`. Until that route exists the workers
 are triggered by hand — which is why neither diagram shows a queue or a schedule. The single
@@ -168,7 +168,7 @@ it is, and it makes `begins_with` work on the sort key.
 | `qa_pairs` | List of Maps | ingest | the essays |
 | `academic_program`, `academic_level`, `major` | String | ingest | what a search matches on |
 | `gpa` | Number | ingest | a number, so it sorts |
-| `source` | Map | ingest | file, sheet, row |
+| `source` | Map | ingest | file, row |
 | `parsed_at` | String | ingest | |
 | `content_hash` | String | ingest | tells a changed application from an unchanged one |
 | `category_scores` | Map | worker | `{career_goals: {score, max}, …}` — numbers only |
@@ -473,7 +473,7 @@ read no data store.
 
 Because the app and the API share one origin, the API SHALL NOT grant cross-origin access to
 anyone. The environment bucket SHALL grant exactly one: `PUT` from the app's own origins, so
-the browser's presigned upload of a workbook is answered. No other method and no other origin
+the browser's presigned upload of an export is answered. No other method and no other origin
 SHALL be allowed, and no read SHALL be.
 
 #### Scenario: Call from the web app
@@ -486,7 +486,7 @@ SHALL be allowed, and no read SHALL be.
 - **WHEN** a browser on any other origin calls the API
 - **THEN** no origin is granted access, and the browser blocks the response
 
-#### Scenario: A workbook is uploaded from the browser
+#### Scenario: An export is uploaded from the browser
 
 - **WHEN** the browser preflights its presigned `PUT` to the bucket
 - **THEN** the bucket answers it, because the app's own origin and that one method are allowed,
@@ -512,7 +512,7 @@ whether the token check passed.
 ### Requirement: Each environment owns its own data stores
 
 An environment SHALL have one table holding applications, scores, and rubrics, and one
-bucket holding uploaded workbooks and batch files under separate prefixes, both
+bucket holding uploaded exports and batch files under separate prefixes, both
 named so they cannot collide with another environment's. Creating an environment SHALL NOT
 read from or write to any store outside it.
 
@@ -872,15 +872,61 @@ reading the whole table.
 - **THEN** it reads one cohort's items, addressed by scholarship and year, not every item
   in the table
 
-### Requirement: Ingesting a workbook again does not destroy what scoring wrote
+### Requirement: An export is read as a workbook or a CSV
+
+Ingest SHALL read an application export saved as an `.xlsx` workbook or as a `.csv` file, and
+SHALL produce the same applications from either. Both SHALL be read by the same column map and
+the same header-row check, and the academic year SHALL come from the file name either way. A
+file under the uploads prefix with any other suffix SHALL be left alone rather than failed.
+
+A CSV SHALL NOT be required to be UTF-8. Ingest SHALL read the encodings the office's export
+tool actually produces, and SHALL NOT fail a whole file over a single character it could
+decode. A field SHALL be allowed to run across lines.
+
+#### Scenario: The export is a workbook
+
+- **WHEN** an `.xlsx` export is ingested
+- **THEN** its rows become applications in the cohort the file name's year names
+
+#### Scenario: The export is a CSV
+
+- **WHEN** a `.csv` export naming the same columns is ingested
+- **THEN** the same applications are written under the same keys, and the duplicate and
+  re-ingest rules apply to it unchanged
+
+#### Scenario: A CSV that is not UTF-8
+
+- **WHEN** an essay in a CSV contains a curly apostrophe written in a Windows code page rather
+  than UTF-8
+- **THEN** the file is read and the character is kept, rather than the whole export failing on
+  one byte
+
+#### Scenario: A CSV saved out of a spreadsheet program
+
+- **WHEN** a CSV carries a byte-order mark ahead of its first column name
+- **THEN** the header row is still read, so the file is not refused for naming none of the
+  export's columns
+
+#### Scenario: An essay runs across several lines
+
+- **WHEN** a quoted field in a CSV contains line breaks
+- **THEN** it is read as one field of one application, and the line breaks are kept in the
+  essay text
+
+#### Scenario: Some other file lands under the uploads prefix
+
+- **WHEN** a file that is neither an `.xlsx` nor a `.csv` lands under the uploads prefix
+- **THEN** nothing is ingested and nothing is reported as a failure
+
+### Requirement: Ingesting an export again does not destroy what scoring wrote
 
 Ingest SHALL update the application fields it owns and leave every other field alone. It
 SHALL NOT reset an application's scoring state unless the application's own content
 changed.
 
-#### Scenario: Workbook uploaded twice
+#### Scenario: Export uploaded twice
 
-- **WHEN** a workbook is ingested again and an application in it is already scored
+- **WHEN** an export is ingested again and an application in it is already scored
 - **THEN** its score, scoring state, and any review state are still there afterwards
 
 #### Scenario: An application's content changed
@@ -911,9 +957,9 @@ without being reported.
 - **WHEN** the same student applies to two scholarships
 - **THEN** the two applications are stored as two items
 
-#### Scenario: Duplicate row in one workbook
+#### Scenario: Duplicate row in one export
 
-- **WHEN** a workbook contains two rows that resolve to the same application
+- **WHEN** an export contains two rows that resolve to the same application
 - **THEN** the ingest reports the duplicate rather than silently keeping one
 
 ### Requirement: An item is claimed before it is scored
@@ -1304,7 +1350,7 @@ the web app already has, and one that stays shut:
 
 | Screen | Its job |
 | --- | --- |
-| Dashboard | A trigger section, and for now that is the whole screen: upload a workbook, publish and pick a rubric, every trigger, and progress. The reliability analysis already there is kept in the code, below it, untouched |
+| Dashboard | A trigger section, and for now that is the whole screen: upload an export, publish and pick a rubric, every trigger, and progress. The reliability analysis already there is kept in the code, below it, untouched |
 | Scholarships | Find an application, rank a cohort, read the per-criterion scores, export |
 | Reviews | Nothing yet. Sign-off is not built, so it is not offered |
 
@@ -1313,10 +1359,10 @@ trigger section — the two uploads, the version picker, the triggers, and the p
 and nothing else is built on it. The reliability analysis already on the screen is kept as it
 stands, below the trigger section; it is not rebuilt, and it is not deleted.
 
-The first is the workbook upload. A person picks a workbook on the dashboard and it goes to the
-uploads prefix in the environment's bucket, where ingest picks it up. That is the only way an
-export gets into the system, and it is the only thing an upload triggers — the file landing
-does not start scoring.
+The first is the export upload. A person picks an export on the dashboard — a workbook or a CSV,
+whichever the office exported — and it goes to the uploads prefix in the environment's bucket,
+where ingest picks it up. That is the only way an export gets into the system, and it is the
+only thing an upload triggers — the file landing does not start scoring.
 
 The second is the rubric. A rubric arrives the same way an export does: someone uploads its
 text, weights are typed beside the criteria the parse found, and it is written as a version.
@@ -1522,25 +1568,31 @@ the cohort it covers.
 - **THEN** it says how many of the cohort are ranked, unscored, failed, and scored under
   an older rubric version
 
-### Requirement: The workbook is uploaded from the dashboard
+### Requirement: The export is uploaded from the dashboard
 
-The dashboard SHALL be where a person uploads an application export. The file SHALL go to
-the uploads prefix in the environment's bucket, where ingest reads it. An upload SHALL NOT
-start scoring.
+The dashboard SHALL be where a person uploads an application export. The picker SHALL accept
+an `.xlsx` or a `.csv`, and SHALL refuse any other suffix on the screen rather than handing out
+an upload URL for a file nothing will read. The file SHALL go to the uploads prefix in the
+environment's bucket, where ingest reads it. An upload SHALL NOT start scoring.
 
 #### Scenario: A person uploads an export
 
-- **WHEN** a person picks a workbook on the dashboard
+- **WHEN** a person picks an export on the dashboard
 - **THEN** it is stored under the uploads prefix, ingest writes its applications into the
   cohort, and the screen says how many rows came in
 
+#### Scenario: A person picks a file of some other kind
+
+- **WHEN** a person picks a file that is neither an `.xlsx` nor a `.csv`
+- **THEN** the screen says which two kinds it takes, and nothing is uploaded
+
 #### Scenario: An upload lands
 
-- **WHEN** a workbook finishes uploading
+- **WHEN** an export finishes uploading
 - **THEN** nothing is scored, and the cohort's applications sit unscored until someone
   presses the scoring button
 
-#### Scenario: The same workbook is uploaded twice
+#### Scenario: The same export is uploaded twice
 
 - **WHEN** an export is uploaded again for a cohort that has already been scored
 - **THEN** the scores already stored survive it, as the ingest requirement in phase 3
@@ -1604,7 +1656,7 @@ write to no application.
 
 - **WHEN** a person wants to publish for a scholarship that has no applications
 - **THEN** it is not offered — the scholarships available to publish for are the ones with a
-  cohort, so its workbook is uploaded first
+  cohort, so its export is uploaded first
 
 ### Requirement: A run is scored under a rubric version a person picked
 
@@ -1713,7 +1765,7 @@ it is waiting on data.
 ### Requirement: Scoring is started by hand
 
 Scoring SHALL start only when a person asks for it, for a chosen cohort. Nothing SHALL
-score on a schedule or because a workbook was uploaded. The dashboard SHALL say how many
+score on a schedule or because an export was uploaded. The dashboard SHALL say how many
 applications the run would cover and which path it will take before it starts.
 
 #### Scenario: A person starts scoring
@@ -1724,7 +1776,7 @@ applications the run would cover and which path it will take before it starts.
 
 #### Scenario: Nothing is scored without being asked
 
-- **WHEN** a workbook is ingested
+- **WHEN** an export is ingested
 - **THEN** its applications sit unscored until someone starts a run
 
 #### Scenario: Already scored applications are skipped

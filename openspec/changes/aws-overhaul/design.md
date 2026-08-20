@@ -30,7 +30,7 @@ See `proposal.md` — Why. The constraints that shape the design, and nothing el
 
 - One CDK app that defines everything, deployable from nothing to a working environment.
 - One hostname per environment, so the API needs no CORS. The single exception is the
-  browser's PUT of a workbook straight to S3, which the bucket answers with one rule.
+  browser's PUT of an export straight to S3, which the bucket answers with one rule.
 - Scoring that cannot run without someone asking, cannot double-score an application, and
   cannot turn a truncated model reply into a real score.
 - Screens that read the pipeline honestly: part-scored looks part-scored, unreviewed says
@@ -108,7 +108,7 @@ and a preflight on every non-GET. Nothing gained for an internal app.
 
 ### The one cross-origin request is the upload, and the bucket answers it
 
-A workbook goes from the browser to the bucket with a presigned PUT, so a few thousand rows
+An export goes from the browser to the bucket with a presigned PUT, so a few thousand rows
 never pass through a Lambda. That URL is on the bucket's own hostname, and a PUT is never a
 simple request, so the browser preflights it — and S3 answers a preflight only if the bucket
 carries a CORS rule. So it carries exactly one: `PUT` alone, origins the environment's
@@ -126,6 +126,45 @@ and a limit nobody can raise.
 *Alternative — a `/uploads/` behaviour on the distribution.* Keeps the PUT same-origin, but a
 presigned S3 URL signs the S3 hostname, so it cannot be used through CloudFront. It would take
 CloudFront signed URLs, a key group, a public key in the stack, and an OAC that permits writes.
+
+### Two file formats, one row reader
+
+The office exports the intake either way, so ingest takes an `.xlsx` and a `.csv`. The split is
+at decoding only: `openpyxl` for a workbook, the standard library's `csv` module for a CSV, and
+both hand back the same thing — a header line and rows after it. Everything past that point is
+shared, which is what keeps the two formats from drifting into two column maps. Nothing about
+the cohort changes: the scholarship comes from the `AvailabilityId_t` column and the year from
+the file name, neither of which a sheet tab was ever involved in.
+
+**A CSV out of Scholarship Manager is not UTF-8, so the encoding is tried in order.** The export
+we have — 1,903 rows of the SJSU General 25-26 intake — carries `0x92` bytes, the Windows-1252
+curly apostrophe, inside the essays. Read as strict UTF-8 that is not a bad character, it is a
+`UnicodeDecodeError`, and the whole file fails on one apostrophe. So a CSV is decoded as
+`utf-8-sig` first and as `cp1252` if that raises. The order is what makes it safe: UTF-8 is
+self-validating, so a file that decodes clean as UTF-8 almost certainly is UTF-8, while `cp1252`
+maps every possible byte and therefore can never fail — reaching for it first would turn a real
+UTF-8 export into mojibake with nothing raised to say so.
+
+`utf-8-sig` rather than `utf-8` for the same reason the fallback exists. A spreadsheet program
+saving UTF-8 puts a byte-order mark in front of the first column name; left on, the header check
+sees a first column that matches nothing and refuses the file for having no header row — a true
+statement about the bytes and a useless one to the person who exported it. The file we have has
+no BOM, but the one someone re-saves out of Excel will.
+
+**Fields run across lines, so the `csv` module reads them, never a line split.** 1,377 of those
+1,903 rows have an essay with a newline inside its quotes, and the longest single field is 5,261
+characters. Anything that treats a line as a record turns most of the intake into fragments that
+resolve to no student.
+
+Three filters have to name both suffixes, and each one silently drops the file if it does not:
+the EventBridge rule on the bucket, the upload handler's filename check, and the file picker on
+the dashboard. The rule takes two wildcard matchers rather than a suffix list, because a list of
+matchers is an OR and `uploads/` with a bare suffix would also fire on a file anywhere else in
+the bucket. The `~$` lock-file skip stays workbook-only — that is a thing Office does, and a CSV
+never has one.
+
+*Alternative — convert a CSV to a workbook on the way in.* One reader downstream, but it means a
+conversion step that can fail on its own, and it would rewrite the file kept as provenance.
 
 ### The API is called with the ID token, not the access token
 
@@ -305,7 +344,7 @@ the claims with the reason recorded.
 `detail.batchJobName` and nothing about applications. There is no index on `claimed_by`, so a
 job identifier alone gives a Query no partition to read. The job name would be the obvious
 carrier and is not usable: 63 characters, no spaces, `[a-zA-Z0-9]` with limited punctuation,
-while a scholarship name is raw text off a spreadsheet sheet tab. So the collector calls
+while a scholarship name is raw text out of an export column. So the collector calls
 `GetModelInvocationJob` and takes the cohort out of `inputDataConfig.s3InputDataConfig.s3Uri`
 — the worker chose that key when it submitted, so the key is where the cohort is written down.
 The job name stays human-readable-ish for the console, and `clientRequestToken` keeps a
@@ -373,7 +412,7 @@ the limit on a boundary that happens to parse.
 
 ### Phase 4: the dashboard is a trigger section, and the rest is left alone
 
-For this phase the dashboard is one thing: the trigger section — the workbook upload, the rubric
+For this phase the dashboard is one thing: the trigger section — the export upload, the rubric
 panel and its version picker, the four triggers, and progress. That is what gets built. The
 reliability sections already on the screen — the
 human-versus-human against AI-versus-human comparison, the reviewer distribution, and the
@@ -648,7 +687,7 @@ settle.
 ## Migration Plan
 
 There is nothing to migrate. The stores were destroyed, so the first deploy comes up empty
-and a workbook has to be uploaded before any screen has something to show.
+and an export has to be uploaded before any screen has something to show.
 
 Deploy order, once per environment:
 
@@ -656,7 +695,7 @@ Deploy order, once per environment:
 2. `DataStack`, then `EdgeStack`. Data first because everything else references it.
 3. Create the first user in the pool by hand. There is no public sign-up.
 4. Build the web app with the pool id and sign-in domain, upload, invalidate.
-5. Upload a workbook from the dashboard, so the scholarship has a cohort.
+5. Upload an export from the dashboard, so the scholarship has a cohort.
 6. Publish the first rubric version from the dashboard — `rubric.md` uploaded, weights
    10/40/30/10/10 typed in. Nothing can be scored before a version exists, because the prompt,
    the range check, and the total are all built from it.

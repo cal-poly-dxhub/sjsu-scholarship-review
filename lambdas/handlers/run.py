@@ -21,7 +21,7 @@ from typing import Any
 
 import boto3
 
-from shared.http import BadRequest, body_of, reply
+from shared.http import BadRequest, body_of, reply, year_of
 from shared.quota import minimum_batch_records
 from shared.work import SCOPES, MissingRubric, claimable, recomputable, rubric_version_item
 
@@ -45,7 +45,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
     try:
         body = body_of(event)
         scholarship = text(body, "scholarship")
-        year = text(body, "year")
+        year = year_of(text(body, "year"))
         version = text(body, "rubric_version")
         action = one_of(body, "action", ACTIONS, ACTIONS[0])
         scope = scope_of(body)

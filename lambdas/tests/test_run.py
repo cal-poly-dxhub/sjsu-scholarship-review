@@ -140,6 +140,20 @@ def test_a_version_that_was_never_published_is_refused(
     assert started.started == []
 
 
+def test_a_year_in_another_form_is_refused_rather_than_run_against_an_empty_cohort(
+    table: Any, started: Invocations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'2026' is a partition nothing was ever written to, so a run over it would find no work."""
+    put_version(table, "v1", CRITERIA)
+    work_of(monkeypatch, 10)
+
+    response = run.handler(request(year="2026"), None)
+
+    assert response["statusCode"] == 400
+    assert "2025-2026" in answer(response)["message"]
+    assert started.started == []
+
+
 def test_the_scope_reaches_the_worker_and_an_unknown_one_is_refused(
     table: Any, started: Invocations, monkeypatch: pytest.MonkeyPatch
 ) -> None:
