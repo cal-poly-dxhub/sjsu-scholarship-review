@@ -3,6 +3,8 @@
  * this is where a search can quietly lose an applicant.
  */
 
+import { hasCurrentScore } from "./score-state";
+
 /** The fields the list reads. Both reads carry them; the ranked one projects a subset. */
 export interface ListApplication {
   sk: string;
@@ -13,6 +15,8 @@ export interface ListApplication {
   major: string | null;
   gpa: string | number | null;
   total_score: number | null;
+  rubric_version: string | null;
+  claimed_until: string | null;
 }
 
 export interface ListFilters {
@@ -94,7 +98,9 @@ export function matching<T extends ListApplication>(
     if (!within(app.gpa === null ? null : Number(app.gpa), filters.gpaMin, filters.gpaMax)) {
       return false;
     }
-    if (!within(app.total_score, filters.totalMin, filters.totalMax)) return false;
+    // A superseded total is not a total the range can match — the list does not show it either.
+    const total = hasCurrentScore(app) ? app.total_score : null;
+    if (!within(total, filters.totalMin, filters.totalMax)) return false;
     return true;
   });
 }

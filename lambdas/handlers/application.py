@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from shared.http import BadRequest, query_param, reply
+from shared.http import BadRequest, query_param, reply, year_of
 from shared.reads import application
 
 log = logging.getLogger()
@@ -19,7 +19,7 @@ log.setLevel(logging.INFO)
 def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
     try:
         scholarship = query_param(event, "scholarship")
-        year = query_param(event, "year")
+        year = year_of(query_param(event, "year"))
         student = query_param(event, "student")
     except BadRequest as error:
         return reply(400, {"message": str(error)})

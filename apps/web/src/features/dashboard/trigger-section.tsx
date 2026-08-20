@@ -4,10 +4,13 @@ import { api } from "@/api";
 import { Badge } from "@/sjsu/components/ui/badge";
 import { Button } from "@/sjsu/components/ui/button";
 import { Card, CardContent } from "@/sjsu/components/ui/card";
-import { Input } from "@/sjsu/components/ui/input";
 import { Label } from "@/sjsu/components/ui/label";
 import { NativeSelect, NativeSelectOption } from "@/sjsu/components/ui/native-select";
 import { Separator } from "@/sjsu/components/ui/separator";
+import { Spinner } from "@/sjsu/components/ui/spinner";
+import { isAcademicYear } from "@/lib/academic-year";
+import { CohortPicker, type CohortChoice } from "@/features/cohorts/cohort-picker";
+import { runStatus, settling, type Started } from "./run-state";
 import { RubricPanel } from "./rubric-panel";
 import { UploadPanel } from "./upload-panel";
 import { weightsOnlyChange, type RubricVersion } from "./version-change";
@@ -48,6 +51,17 @@ type Run =
   | { action: "recompute" }
   | { action: "score"; scope: "unscored" | "failed" | "changed_version" };
 
+/** One press: what to ask the API for, and the button's own words for it. */
+interface Press {
+  asked: Run;
+  label: string;
+}
+
+/** Which trigger a run came from, so the button that started it is the one that says so. */
+function runKey(asked: Run): string {
+  return asked.action === "score" ? `score:${asked.scope}` : "recompute";
+}
+
 // The same limit the workers stop at. An application here is not picked up by any run again.
 const ATTEMPT_LIMIT = 3;
 
@@ -57,17 +71,27 @@ const BATCH_LINE = 500;
 // A run is watched by re-reading the cohort, because no run record is stored.
 const POLL_MS = 5000;
 
+// While waiting on a run's first claim, re-read faster: showing it took hold is the whole point.
+const SETTLE_POLL_MS = 2000;
+
 /**
- * The half of the dashboard that starts things: a cohort to work on, its workbook, its rubric,
- * and the runs. Scoped to one scholarship and year — the reliability sections below span all of
- * them, which is why the two do not share a picker.
+ * The half of the dashboard that starts things: an export to upload, a cohort to work on, its
+ * rubric, and the runs. Scoped to one scholarship and year — the reliability sections below span
+ * all of them, which is why the two do not share a picker.
  */
 export function TriggerSection() {
-  const [scholarship, setScholarship] = useState("");
-  const [year, setYear] = useState("");
+  const [chosen, setChosen] = useState<CohortChoice>({ scholarship: "", year: "" });
+  const { scholarship, year } = chosen;
   const [pickedVersion, setPickedVersion] = useState<string | null>(null);
   const [path, setPath] = useState<Path>("auto");
+  const [started, setStarted] = useState<Started | null>(null);
   const queryClient = useQueryClient();
+
+  // A cohort is only addressable once the year is the one form, so nothing is read until then.
+  const scoped = scholarship !== "" && isAcademicYear(year);
+
+  // Read on every render, like the claim expiry below, so the window closes on the next poll.
+  const waiting = settling(started, Date.now());
 
   const cohortQuery = useQuery({
     queryKey: ["cohort", scholarship, year],
@@ -75,12 +99,15 @@ export function TriggerSection() {
       api<CohortResponse>(
         `/cohort?scholarship=${encodeURIComponent(scholarship)}&year=${encodeURIComponent(year)}`,
       ),
-    enabled: scholarship !== "" && year !== "",
-    // A run is watched by re-reading the cohort while anything in it is claimed.
-    refetchInterval: (query) =>
-      (query.state.data?.applications ?? []).some((app) => app.status === "processing")
-        ? POLL_MS
-        : false,
+    enabled: scoped,
+    // A run is watched by re-reading the cohort while anything in it is claimed, and from the
+    // press until the first claim shows up — without that second half the screen stops polling
+    // before the worker has claimed anything and the run never appears at all.
+    refetchInterval: (query) => {
+      if (waiting) return SETTLE_POLL_MS;
+      const applications = query.state.data?.applications ?? [];
+      return applications.some((app) => app.status === "processing") ? POLL_MS : false;
+    },
   });
 
   const versionsQuery = useQuery({
@@ -132,12 +159,14 @@ export function TriggerSection() {
   // Everything a scoring run of any scope could still take. Only for the counts beside the list.
   const scoreWork = work.unscored + work.rescore + work.failed;
 
+  const { inFlight, activeKey } = runStatus(started, work.running);
+
   /** Which worker a run of this size goes to, unless someone overrode the path. */
   const workerFor = (count: number): string =>
     path === "auto" ? (count >= BATCH_LINE ? "batch" : "ondemand") : path;
 
   const run = useMutation({
-    mutationFn: (asked: Run) =>
+    mutationFn: ({ asked }: Press) =>
       api<RunResponse>("/run", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -149,51 +178,55 @@ export function TriggerSection() {
           ...(asked.action === "score" && path !== "auto" ? { path } : {}),
         }),
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cohort", scholarship, year] }),
+    onSuccess: (data, { asked, label }) => {
+      // Only a run that actually started locks the screen. A 200 saying there was nothing to do
+      // leaves every button where it was.
+      if (data.started) {
+        setStarted({ at: Date.now(), key: runKey(asked), label, work: data.work });
+      }
+      queryClient.invalidateQueries({ queryKey: ["cohort", scholarship, year] });
+    },
   });
 
-  const scoped = scholarship !== "" && year !== "";
+  /** A button's press. The label travels with it so the run in flight can be named. */
+  const press = (asked: Run, label: string) => () => {
+    setStarted(null);
+    run.mutate({ asked, label });
+  };
+
+  // Every trigger locks, not just the one pressed. They all feed the same cohort, and the reason
+  // to stop a second press is that the first run is still working through the items.
+  const locked = run.isPending || inFlight;
+
   const hasCohort = (cohortQuery.data?.total ?? 0) > 0;
 
   return (
     <div className="space-y-4">
+      <UploadPanel />
+
       <Card>
         <CardContent className="space-y-4">
           <div>
             <h2 className="text-lg font-semibold">Run a cohort</h2>
             <p className="text-sm text-muted-foreground">
-              Type the scholarship and year to work on. There is no read that lists cohorts —
-              every read names one.
+              Pick the cohort to work on. The list is what has been ingested — every other read
+              names one cohort, so this is the only place they can be found.
             </p>
           </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <Label className="text-xs text-muted-foreground">Scholarship</Label>
-              <Input
-                className="mt-1 w-56"
-                value={scholarship}
-                placeholder="sjsu-general"
-                onChange={(event) => {
-                  setScholarship(event.target.value.trim());
-                  setPickedVersion(null);
-                }}
-              />
-            </div>
-            <div>
-              <Label className="text-xs text-muted-foreground">Year</Label>
-              <Input
-                className="mt-1 w-28"
-                value={year}
-                placeholder="2026"
-                onChange={(event) => setYear(event.target.value.trim())}
-              />
-            </div>
-            {scoped && (
-              <Badge variant="outline">
-                {cohortQuery.isLoading ? "reading the cohort…" : `${cohortQuery.data?.total ?? 0} applications`}
-              </Badge>
-            )}
-          </div>
+          <CohortPicker
+            value={chosen}
+            onChange={(choice) => {
+              setChosen(choice);
+              setPickedVersion(null);
+            }}
+          />
+          {scoped && (
+            <Badge variant="outline">
+              {cohortQuery.isLoading
+                ? "reading the cohort…"
+                : `${cohortQuery.data?.total ?? 0} applications`}
+            </Badge>
+          )}
           {cohortQuery.isError && (
             <p className="text-sm text-warning">
               {cohortQuery.error instanceof Error
@@ -204,15 +237,13 @@ export function TriggerSection() {
         </CardContent>
       </Card>
 
-      {scoped && <UploadPanel scholarship={scholarship} year={year} />}
-
       {scoped && hasCohort && <RubricPanel scholarship={scholarship} />}
       {scoped && !hasCohort && !cohortQuery.isLoading && (
         <Card>
           <CardContent>
             <p className="text-sm text-muted-foreground">
               {scholarship} {year} has no applications yet, so there is nothing to publish a
-              rubric for. Upload the workbook first.
+              rubric for. Upload its export first.
             </p>
           </CardContent>
         </Card>
@@ -281,34 +312,57 @@ export function TriggerSection() {
                   </Button>
                 </div>
 
+                {inFlight && (
+                  <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/50 p-3">
+                    <Spinner className="mt-0.5 shrink-0" />
+                    <div className="text-sm">
+                      <p className="font-medium">
+                        {started ? `${started.label} — running` : "A run is in progress"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {work.running > 0
+                          ? `${work.running} claimed and being scored${started ? ` of ${started.work}` : ""}. Every trigger is held until it finishes.`
+                          : "Started. Waiting for the worker to claim its first application, so the counts below have not moved yet."}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid gap-2 sm:grid-cols-2">
                   <Trigger
                     label="Score the unscored"
                     count={work.unscored}
                     detail={`Applications with no total yet. Goes to the ${workerFor(work.unscored)} worker.`}
-                    onRun={() => run.mutate({ action: "score", scope: "unscored" })}
-                    busy={run.isPending}
+                    onRun={press({ action: "score", scope: "unscored" }, "Score the unscored")}
+                    locked={locked}
+                    running={activeKey === "score:unscored"}
                   />
                   <Trigger
                     label="Recompute after a weight change"
                     count={work.recompute}
                     detail="Totals made under a version that changed weights only. No model call."
-                    onRun={() => run.mutate({ action: "recompute" })}
-                    busy={run.isPending}
+                    onRun={press({ action: "recompute" }, "Recompute after a weight change")}
+                    locked={locked}
+                    running={activeKey === "recompute"}
                   />
                   <Trigger
                     label="Rescore what changed"
                     count={work.rescore}
                     detail={`Totals made under a version whose criteria differ from ${version}. ${work.rescore} model calls, on the ${workerFor(work.rescore)} worker.`}
-                    onRun={() => run.mutate({ action: "score", scope: "changed_version" })}
-                    busy={run.isPending}
+                    onRun={press(
+                      { action: "score", scope: "changed_version" },
+                      "Rescore what changed",
+                    )}
+                    locked={locked}
+                    running={activeKey === "score:changed_version"}
                   />
                   <Trigger
                     label="Retry what failed"
                     count={work.failed}
                     detail={`Failures under the ${ATTEMPT_LIMIT}-attempt limit. Goes to the ${workerFor(work.failed)} worker.`}
-                    onRun={() => run.mutate({ action: "score", scope: "failed" })}
-                    busy={run.isPending}
+                    onRun={press({ action: "score", scope: "failed" }, "Retry what failed")}
+                    locked={locked}
+                    running={activeKey === "score:failed"}
                   />
                 </div>
 
@@ -374,19 +428,25 @@ export function TriggerSection() {
   );
 }
 
-/** One trigger. A count of zero is shown and unavailable, not hidden. */
+/**
+ * One trigger. A count of zero is shown and unavailable, not hidden.
+ *
+ * `locked` is any run being in flight; `running` is this button being the one that started it.
+ */
 function Trigger({
   label,
   count,
   detail,
   onRun,
-  busy,
+  locked,
+  running,
 }: {
   label: string;
   count: number;
   detail: string;
   onRun: () => void;
-  busy: boolean;
+  locked: boolean;
+  running: boolean;
 }) {
   return (
     <div className="flex items-start justify-between gap-3 rounded-lg border border-border p-3">
@@ -396,8 +456,9 @@ function Trigger({
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <Badge variant={count > 0 ? "secondary" : "outline"}>{count}</Badge>
-        <Button size="sm" disabled={count === 0 || busy} onClick={onRun}>
-          Run
+        <Button size="sm" disabled={count === 0 || locked} onClick={onRun}>
+          {running && <Spinner />}
+          {running ? "Running" : "Run"}
         </Button>
       </div>
     </div>

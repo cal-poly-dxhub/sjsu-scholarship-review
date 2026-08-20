@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from shared.reads import cohort, counts
-from helpers import put_application, put_scored, stamp
+from helpers import SCHOLARSHIP, YEAR, put_application, put_scored, stamp
 
 
 def mixed(table: Any) -> list[dict[str, Any]]:
@@ -15,7 +15,7 @@ def mixed(table: Any) -> list[dict[str, Any]]:
     put_application(table, "held", status="processing", claimed_by="run-one", claimed_until=stamp(10))
     put_application(table, "abandoned", status="processing", claimed_by="dead", claimed_until=stamp(-10))
     put_application(table, "broken", status="score_failed", failure="a bad reply", attempt=3)
-    return cohort("sjsu-general", "2026")
+    return cohort(SCHOLARSHIP, YEAR)
 
 
 def test_a_mixed_cohort_reports_what_is_done_and_what_is_left(table: Any) -> None:
@@ -39,7 +39,7 @@ def test_a_cohort_a_batch_job_is_working_on_does_not_read_as_nearly_finished(tab
         )
     put_scored(table, "already", total=80, version="v1")
 
-    progress = counts(cohort("sjsu-general", "2026"))
+    progress = counts(cohort(SCHOLARSHIP, YEAR))
 
     assert progress["states"]["running"] == 4
     assert progress["states"]["scored"] == 1
@@ -50,7 +50,7 @@ def test_the_cohort_read_leaves_the_essays_behind(table: Any) -> None:
     """Every list and every count comes off this read, and none of them shows an essay."""
     put_application(table, "one")
 
-    read = cohort("sjsu-general", "2026")[0]
+    read = cohort(SCHOLARSHIP, YEAR)[0]
 
     assert "qa_pairs" not in read
     assert read["student_uuid"] == "one"

@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .table import YearFormat, checked_year
+
 
 class BadRequest(Exception):
     """What the caller sent cannot be worked with. Answered as 400, not raised at the runtime."""
@@ -34,6 +36,14 @@ def body_of(event: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise BadRequest("the request body is not a JSON object")
     return parsed
+
+
+def year_of(value: str) -> str:
+    """An academic year a cohort key can be built from, or a 400 that says the form."""
+    try:
+        return checked_year(value)
+    except YearFormat as error:
+        raise BadRequest(str(error)) from error
 
 
 def query_param(event: dict[str, Any], name: str) -> str:

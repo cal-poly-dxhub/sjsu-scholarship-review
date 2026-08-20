@@ -1,4 +1,5 @@
 import { api } from "@/api";
+import { scoreState } from "./score-state";
 
 /**
  * Building the export file, in the browser, out of what the screen already fetched. Nothing is
@@ -18,6 +19,7 @@ export interface ExportCriterion {
 export interface ExportApplication {
   student_uuid: string;
   status: string;
+  claimed_until: string | null;
   academic_program: string | null;
   academic_level: string | null;
   major: string | null;
@@ -52,6 +54,8 @@ export const EXPORT_WARNINGS = [
   "No score here is signed off — reviewer sign-off is not built.",
   "Only totals made under the same rubric version are comparable with each other.",
   "Unscored and failed applications are in this file with their state, not as a zero.",
+  "A row whose state is not 'scored' carries the previous score, not a current one: the answers"
+    + " changed after it was made, or a run is working on it now.",
 ];
 
 // Named rather than only left out, so nobody reading this file mistakes a trimmed row for the
@@ -201,7 +205,7 @@ function row(
   const score = scores?.[app.student_uuid] ?? null;
   return {
     student_uuid: app.student_uuid,
-    state: state(app),
+    state: scoreState(app),
     academic_program: app.academic_program,
     academic_level: app.academic_level,
     major: app.major,
@@ -228,12 +232,6 @@ function row(
       };
     }),
   };
-}
-
-function state(app: ExportApplication): string {
-  if (app.status === "score_failed") return "failed";
-  if (app.total_score === null) return "unscored";
-  return "scored";
 }
 
 /** Hand the file over as a download. The JSON is indented, because a person reads it. */

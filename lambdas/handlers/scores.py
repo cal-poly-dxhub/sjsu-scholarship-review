@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from shared.http import BadRequest, body_of, reply
+from shared.http import BadRequest, body_of, reply, year_of
 from shared.reads import BATCH_KEYS, BatchTooBig, newest_scores
 
 log = logging.getLogger()
@@ -22,7 +22,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
     try:
         body = body_of(event)
         scholarship = text(body, "scholarship")
-        year = text(body, "year")
+        year = year_of(text(body, "year"))
         wanted = keys_of(body)
     except BadRequest as error:
         return reply(400, {"message": str(error)})

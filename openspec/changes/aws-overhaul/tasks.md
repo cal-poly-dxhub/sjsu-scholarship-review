@@ -385,15 +385,17 @@ suite and run by a person — it is the only item here with no checkbox.
 - [x] 7.26 Progress counted off the applications, not a stored run: a cohort mixing scored,
   claimed, failed, and untouched applications reports the right numbers done and left, and a
   cohort claimed by a batch job reports a wait of hours rather than reading as nearly finished.
-- 7.27 One end-to-end, slow, **a person's to run, not an agent's**: upload a small workbook
-  through the dashboard, publish `rubric.md` as a version with its weights, press score, wait
-  for the cohort to finish, rank it, open an application, and export. Against real AWS in `dev`.
-  Not part of the fast suite, and it carries no checkbox — nobody ticks this off on someone
-  else's word. Whoever runs it says what they saw.
+- 7.27 One end-to-end, slow, **a person's to run, not an agent's**: upload an export through the
+  dashboard, publish `rubric.md` as a version with its weights, press score, wait for the cohort
+  to finish, rank it, open an application, and export. Against real AWS in `dev`. This is where
+  the real file belongs, not the fast suite — `SJSU General Scholarship 25-26 ad hoc
+  report(ScholarshipManagerData (22)).csv`, 1,903 rows of the actual intake, which also puts the
+  run over the 500-row line and onto the batch path. Not part of the fast suite, and it carries no
+  checkbox — nobody ticks this off on someone else's word. Whoever runs it says what they saw.
 
 ## 8. What a review found, before the deploy
 
-Six gaps between what the earlier sections claim and what the code does. Each is small, and each
+Gaps between what the earlier sections claim and what the code does. Each is small, and each
 one leaves a screen or a file saying something that is not true, so they land before `dev` is
 deployed.
 
@@ -431,3 +433,31 @@ deployed.
   counts (8.5); a reply the model marked cut off fails with that reason and one it did not,
   containing the same text, does not (8.6). Extend `test_batch.py` and `test_reply.py` rather
   than adding files. No test for 8.1 or 8.2 — a CORS rule and a header swap are wiring.
+- [x] 8.8 Ingest reads a CSV as well as a workbook. `workers/ingest.py` picks the decoder off the
+  key's suffix — `openpyxl` for `.xlsx`, the standard library's `csv` module for `.csv` — and both
+  feed the one header check and column map that are already there. The CSV body is decoded
+  `utf-8-sig` first, `cp1252` if that raises: the real export carries Windows-1252 curly
+  apostrophes in the essays, so strict UTF-8 fails the whole file on one byte, and `cp1252` cannot
+  be the default because it maps every byte and would silently mangle a genuine UTF-8 export. Read
+  through `csv.reader` over the decoded text, never by splitting lines — most rows have an essay
+  with newlines inside its quotes. The `~$` lock-file skip stays on the workbook branch. Nothing
+  about the year, the keying, the duplicate report, or the re-ingest rules changes.
+- [x] 8.9 The three filters that decide whether a CSV is ever seen. `ComputeStack`'s EventBridge
+  rule takes two wildcard matchers, `uploads/*.xlsx` and `uploads/*.csv` — a list of matchers is
+  an OR, so this stays one prefix-and-suffix pair per entry rather than a prefix and a loose
+  suffix that would fire anywhere in the bucket. `handlers/upload.py`'s `NAME` pattern accepts
+  either suffix and its refusal message names both. `upload-panel.tsx` accepts `.xlsx,.csv` and
+  its label says so. Miss any one of the three and a CSV is refused, or worse, uploaded to a
+  prefix nothing reads and reported as landed.
+- [x] 8.10 Tests for 8.8, in `test_ingest.py` alongside the workbook fixture. The fixture is cut
+  from the real export — `SJSU General Scholarship 25-26 ad hoc report(ScholarshipManagerData
+  (22)).csv` — so it cannot drift from what the office sends: its exact 9-column header in the
+  export's own order, a handful of rows, and the three traits that break a reader kept intact — a
+  `0x92` curly apostrophe, an essay with newlines inside its quotes, and a quoted comma. Student
+  ids and essay text are replaced with synthetic values, because `.gitignore` excludes `*.csv` as
+  institutional data and the real rows are 1,903 applicants' essays. Assert: the CSV produces the
+  same applications as the equivalent workbook, a header with a byte-order mark is read rather
+  than refused, a multi-line essay arrives as one `qa_pairs` answer with its breaks, and a key
+  with some other suffix is left alone rather than failed. The formats agreeing is the whole
+  claim, so the comparison is the test. No test for 8.9 — a suffix pattern and a picker attribute
+  are wiring.

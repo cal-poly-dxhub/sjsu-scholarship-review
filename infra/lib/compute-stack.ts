@@ -79,6 +79,15 @@ export class ComputeStack extends Stack {
     props.table.grantReadWriteData(publish);
     this.route('RubricPublishRoute', apigwv2.HttpMethod.POST, '/api/rubric-versions', publish);
 
+    // The only read that names no cohort, so it is the one a screen can start from.
+    const cohorts = this.pythonFunction('Cohorts', {
+      name: 'cohorts',
+      handler: 'handlers.cohorts.handler',
+      description: 'Every cohort that has been ingested, so nobody has to guess a slug.',
+    });
+    props.table.grantReadData(cohorts);
+    this.route('CohortsRoute', apigwv2.HttpMethod.GET, '/api/cohorts', cohorts);
+
     // The two reads every screen uses. Read-only on the table, and neither touches the bucket.
     const cohort = this.pythonFunction('Cohort', {
       name: 'cohort',
@@ -118,8 +127,8 @@ export class ComputeStack extends Stack {
     const ingest = this.pythonFunction('Ingest', {
       name: 'ingest',
       handler: 'workers.ingest.handler',
-      description: 'Reads an uploaded workbook and writes its applications into the cohort.',
-      // A workbook is a few thousand rows and every row is a read plus a write.
+      description: 'Reads an uploaded export and writes its applications into the cohort.',
+      // An export is a few thousand rows and every row is a read plus a write.
       timeout: Duration.minutes(10),
       memorySize: 1024,
       layers: [
@@ -128,17 +137,23 @@ export class ComputeStack extends Stack {
     });
     props.table.grantReadWriteData(ingest);
     props.bucket.grantRead(ingest, `${BUCKET_PREFIXES.uploads}*`);
-    new events.Rule(this, 'UploadedWorkbook', {
-      ruleName: `${props.envName}-uploaded-workbook`,
-      description: 'A workbook landing under uploads/ starts the ingest worker.',
+    new events.Rule(this, 'UploadedExport', {
+      ruleName: `${props.envName}-uploaded-export`,
+      description: 'An export landing under uploads/ starts the ingest worker.',
       eventPattern: {
         source: ['aws.s3'],
         detailType: ['Object Created'],
         detail: {
           bucket: { name: [props.bucket.bucketName] },
-          // One wildcard, not a prefix and a suffix: a list of matchers is an OR, so those two
-          // would also fire on a .xlsx anywhere in the bucket.
-          object: { key: [{ wildcard: `${BUCKET_PREFIXES.uploads}*.xlsx` }] },
+          // One wildcard per format, each carrying the prefix. A list of matchers is an OR, so
+          // splitting these into a prefix and two suffixes would also fire on a .csv anywhere
+          // in the bucket — including the batch/ files the scoring worker writes.
+          object: {
+            key: [
+              { wildcard: `${BUCKET_PREFIXES.uploads}*.xlsx` },
+              { wildcard: `${BUCKET_PREFIXES.uploads}*.csv` },
+            ],
+          },
         },
       },
       targets: [new targets.LambdaFunction(ingest)],
@@ -219,12 +234,12 @@ export class ComputeStack extends Stack {
     });
     props.table.grantReadWriteData(recompute);
 
-    // The dashboard's two writes: a URL to upload a workbook to, and starting a run. Both are
+    // The dashboard's two writes: a URL to upload an export to, and starting a run. Both are
     // last so the run route can name the workers it invokes.
     const upload = this.pythonFunction('Upload', {
       name: 'upload',
       handler: 'handlers.upload.handler',
-      description: 'Hands out a URL for uploading one workbook to the uploads prefix.',
+      description: 'Hands out a URL for uploading one export to the uploads prefix.',
       environment: { BUCKET_NAME: props.bucket.bucketName },
     });
     props.bucket.grantPut(upload, `${BUCKET_PREFIXES.uploads}*`);

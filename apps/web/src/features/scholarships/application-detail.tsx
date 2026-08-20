@@ -1,11 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, TriangleAlert } from "lucide-react";
 import { api } from "@/api";
 import { Badge } from "@/sjsu/components/ui/badge";
 import { Button } from "@/sjsu/components/ui/button";
 import { Card, CardContent } from "@/sjsu/components/ui/card";
 import { Separator } from "@/sjsu/components/ui/separator";
 import { applicationExport, download } from "./export";
+import { scoreState, type ScoreState } from "./score-state";
 
 interface QAPair {
   question_id: string;
@@ -92,6 +93,9 @@ export function ApplicationDetail({
 
   const application = data?.application;
   const score = data?.score ?? null;
+  // A score item is still readable after the answers change or while a rescore runs. Which of
+  // those it is decides whether this screen presents it as the score or as the previous one.
+  const state = application ? scoreState(application) : "unscored";
   // The criteria of the version this score was made under, in the rubric's own order. A
   // criterion the score does not carry is shown as missing rather than as a zero.
   const criteria =
@@ -149,8 +153,11 @@ export function ApplicationDetail({
             <NoScore application={application} />
           ) : (
             <div className="space-y-4">
+              <PreviousScoreNotice state={state} />
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-lg font-semibold">Scores by criterion</h2>
+                <h2 className="text-lg font-semibold">
+                  {state === "scored" ? "Scores by criterion" : "The previous scores by criterion"}
+                </h2>
                 <Badge variant="secondary">total {score.total_score}</Badge>
                 <Badge variant="outline">rubric {score.rubric_version}</Badge>
                 <Badge variant="outline">unreviewed</Badge>
@@ -228,6 +235,32 @@ function CriterionCard({
             This criterion is not on the score item, so there is nothing to read.
           </p>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Why the scores below are not this application's current score. Nothing when they are. */
+function PreviousScoreNotice({ state }: { state: ScoreState }) {
+  if (state === "scored") return null;
+
+  const reason =
+    state === "needs_rescore"
+      ? "The answers changed after these scores were made, so they were scored from text this"
+        + " application no longer holds. They stay here to be read; a run from the dashboard"
+        + " replaces them."
+      : state === "running"
+        ? "A run holds this application right now. These are the scores it had before, and they"
+          + " are replaced when the run writes its own."
+        : state === "failed"
+          ? "The last attempt failed. These are the scores from before it."
+          : "These are not this application's current scores.";
+
+  return (
+    <Card size="sm" className="border-warning">
+      <CardContent className="flex items-start gap-2">
+        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
+        <p className="text-sm">{reason}</p>
       </CardContent>
     </Card>
   );
