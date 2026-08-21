@@ -43,7 +43,7 @@ const REQUIREMENTS_DIR = path.join(CODE_ROOT, 'requirements');
  * call can land in any US region and the policy has to allow the model there as well as the
  * profile here.
  */
-const MODEL_ID = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+const MODEL_ID = 'us.anthropic.claude-sonnet-4-6';
 
 /** The Lambdas: route handlers, the ingest worker, and the two scoring workers. */
 export class ComputeStack extends Stack {
@@ -124,6 +124,14 @@ export class ComputeStack extends Stack {
     props.table.grantReadData(scores);
     this.route('ScoresRoute', apigwv2.HttpMethod.POST, '/api/scores', scores);
 
+    // One layer for both ingest workers. They read the same two formats through the same reader,
+    // so a second copy of openpyxl would only be a second thing to keep in step.
+    const workbooks = this.pythonLayer(
+      'OpenpyxlLayer',
+      'openpyxl.txt',
+      'openpyxl, for reading workbooks.',
+    );
+
     const ingest = this.pythonFunction('Ingest', {
       name: 'ingest',
       handler: 'workers.ingest.handler',
@@ -131,9 +139,7 @@ export class ComputeStack extends Stack {
       // An export is a few thousand rows and every row is a read plus a write.
       timeout: Duration.minutes(10),
       memorySize: 1024,
-      layers: [
-        this.pythonLayer('OpenpyxlLayer', 'openpyxl.txt', 'openpyxl, for reading workbooks.'),
-      ],
+      layers: [workbooks],
     });
     props.table.grantReadWriteData(ingest);
     props.bucket.grantRead(ingest, `${BUCKET_PREFIXES.uploads}*`);
@@ -159,6 +165,64 @@ export class ComputeStack extends Stack {
       targets: [new targets.LambdaFunction(ingest)],
     });
 
+    // The only worker that both reads and writes the table off a file: it reads the cohort to
+    // match each row's applicant, and writes the reviewers' scores and the gap.
+    const reviewerIngest = this.pythonFunction('ReviewerIngest', {
+      name: 'reviewer-ingest',
+      handler: 'workers.reviewer_ingest.handler',
+      description: "Reads an uploaded reviewer-score file into a cohort and works out each gap.",
+      // A few thousand rows, each with a read behind it, plus a summary rebuilt at the end.
+      timeout: Duration.minutes(10),
+      memorySize: 1024,
+      layers: [workbooks],
+    });
+    props.table.grantReadWriteData(reviewerIngest);
+    props.bucket.grantRead(reviewerIngest, `${BUCKET_PREFIXES.reviewerScores}*`);
+    new events.Rule(this, 'UploadedReviewerScores', {
+      ruleName: `${props.envName}-uploaded-reviewer-scores`,
+      description: 'A reviewer-score file landing under reviewer-scores/ starts its ingest worker.',
+      eventPattern: {
+        source: ['aws.s3'],
+        detailType: ['Object Created'],
+        detail: {
+          bucket: { name: [props.bucket.bucketName] },
+          // One wildcard per format, each carrying the prefix, for the same reason the export
+          // rule does it that way: a list of matchers is an OR.
+          object: {
+            key: [
+              { wildcard: `${BUCKET_PREFIXES.reviewerScores}*.xlsx` },
+              { wildcard: `${BUCKET_PREFIXES.reviewerScores}*.csv` },
+            ],
+          },
+        },
+      },
+      targets: [new targets.LambdaFunction(reviewerIngest)],
+    });
+
+    const flagged = this.pythonFunction('Flagged', {
+      name: 'flagged',
+      handler: 'handlers.flagged.handler',
+      description: 'One page of the review queue, read off the gap index, widest gap first.',
+    });
+    props.table.grantReadData(flagged);
+    this.route('FlaggedRoute', apigwv2.HttpMethod.GET, '/api/flagged', flagged);
+
+    const agreement = this.pythonFunction('Agreement', {
+      name: 'agreement',
+      handler: 'handlers.agreement.handler',
+      description: 'How far apart the model and the reviewers are, off the cohort summaries.',
+    });
+    props.table.grantReadData(agreement);
+    this.route('AgreementRoute', apigwv2.HttpMethod.GET, '/api/agreement', agreement);
+
+    const uploadReport = this.pythonFunction('UploadReport', {
+      name: 'upload-report',
+      handler: 'handlers.upload_report.handler',
+      description: 'What an ingest made of one uploaded file, by the key it was uploaded to.',
+    });
+    props.table.grantReadData(uploadReport);
+    this.route('UploadReportRoute', apigwv2.HttpMethod.GET, '/api/upload-report', uploadReport);
+
     const onDemand = this.pythonFunction('ScoreOnDemand', {
       name: 'score-ondemand',
       handler: 'workers.score_ondemand.handler',
@@ -168,6 +232,10 @@ export class ComputeStack extends Stack {
       timeout: Duration.minutes(15),
       memorySize: 512,
       environment: { MODEL_ID },
+      // The worker raises when any item failed, and the run route invokes it asynchronously, so
+      // Lambda's default two retries re-run the whole cohort twice over — a quarter of an hour
+      // each time, scoring nothing new. A run that needs another go is a button on the dashboard.
+      retryAttempts: 0,
     });
     props.table.grantReadWriteData(onDemand);
     onDemand.addToRolePolicy(
@@ -239,10 +307,11 @@ export class ComputeStack extends Stack {
     const upload = this.pythonFunction('Upload', {
       name: 'upload',
       handler: 'handlers.upload.handler',
-      description: 'Hands out a URL for uploading one export to the uploads prefix.',
+      description: 'Hands out a URL for uploading one export or one reviewer-score file.',
       environment: { BUCKET_NAME: props.bucket.bucketName },
     });
     props.bucket.grantPut(upload, `${BUCKET_PREFIXES.uploads}*`);
+    props.bucket.grantPut(upload, `${BUCKET_PREFIXES.reviewerScores}*`);
     this.route('UploadRoute', apigwv2.HttpMethod.POST, '/api/upload', upload);
 
     const run = this.pythonFunction('Run', {
@@ -349,6 +418,7 @@ export class ComputeStack extends Stack {
       memorySize?: number;
       layers?: lambda.ILayerVersion[];
       environment?: Record<string, string>;
+      retryAttempts?: number;
     },
   ): lambda.Function {
     const logGroup = new logs.LogGroup(this, `${id}Logs`, {
@@ -367,6 +437,7 @@ export class ComputeStack extends Stack {
       memorySize: options.memorySize ?? 256,
       environment: { TABLE_NAME: this.props.table.tableName, ...options.environment },
       layers: options.layers,
+      retryAttempts: options.retryAttempts,
       logGroup,
     });
   }

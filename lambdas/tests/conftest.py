@@ -16,7 +16,7 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 os.environ.setdefault("AWS_SESSION_TOKEN", "testing")
 os.environ.setdefault("TABLE_NAME", "test-scholarship")
 os.environ.setdefault("BUCKET_NAME", "test-bucket")
-os.environ.setdefault("MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+os.environ.setdefault("MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 os.environ.setdefault("BATCH_ROLE_ARN", "arn:aws:iam::123456789012:role/test-bedrock-batch")
 os.environ.setdefault("ONDEMAND_FUNCTION", "test-score-ondemand")
 os.environ.setdefault("BATCH_FUNCTION", "test-score-batch")
@@ -34,6 +34,7 @@ from shared.rubric import parse_rubric  # noqa: E402
 RUBRIC_FILE = Path(__file__).resolve().parents[2] / "rubric.md"
 
 RANK_INDEX = "rank-by-total"
+GAP_INDEX = "gap-by-size"
 
 
 @pytest.fixture(scope="session")
@@ -51,6 +52,8 @@ def _table_once() -> Any:
                 {"AttributeName": "sk", "AttributeType": "S"},
                 {"AttributeName": "rank_pk", "AttributeType": "S"},
                 {"AttributeName": "total_score", "AttributeType": "N"},
+                {"AttributeName": "gap_pk", "AttributeType": "S"},
+                {"AttributeName": "score_gap", "AttributeType": "N"},
             ],
             GlobalSecondaryIndexes=[
                 {
@@ -60,7 +63,33 @@ def _table_once() -> Any:
                         {"AttributeName": "total_score", "KeyType": "RANGE"},
                     ],
                     "Projection": {"ProjectionType": "ALL"},
-                }
+                },
+                {
+                    "IndexName": GAP_INDEX,
+                    "KeySchema": [
+                        {"AttributeName": "gap_pk", "KeyType": "HASH"},
+                        {"AttributeName": "score_gap", "KeyType": "RANGE"},
+                    ],
+                    # The same narrow projection the CDK builds, so a field the queue asks for
+                    # and the real index does not carry fails here too.
+                    "Projection": {
+                        "ProjectionType": "INCLUDE",
+                        "NonKeyAttributes": [
+                            "student_uuid",
+                            "scholarship",
+                            "year",
+                            "total_score",
+                            "reviewer_total",
+                            "reviewer_count",
+                            "reviewers_stored",
+                            "rubric_version",
+                            "academic_program",
+                            "academic_level",
+                            "major",
+                            "gpa",
+                        ],
+                    },
+                },
             ],
             BillingMode="PAY_PER_REQUEST",
         )

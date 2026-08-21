@@ -17,6 +17,8 @@ export interface ListApplication {
   total_score: number | null;
   rubric_version: string | null;
   claimed_until: string | null;
+  reviewer_total?: number | null;
+  score_gap?: number | null;
 }
 
 export interface ListFilters {
@@ -27,6 +29,10 @@ export interface ListFilters {
   gpaMax: string;
   totalMin: string;
   totalMax: string;
+  reviewerMin: string;
+  reviewerMax: string;
+  gapMin: string;
+  gapMax: string;
 }
 
 export const EMPTY_FILTERS: ListFilters = {
@@ -37,6 +43,10 @@ export const EMPTY_FILTERS: ListFilters = {
   gpaMax: "",
   totalMin: "",
   totalMax: "",
+  reviewerMin: "",
+  reviewerMax: "",
+  gapMin: "",
+  gapMax: "",
 };
 
 export function isFiltering(search: string, filters: ListFilters): boolean {
@@ -101,18 +111,23 @@ export function matching<T extends ListApplication>(
     // A superseded total is not a total the range can match — the list does not show it either.
     const total = hasCurrentScore(app) ? app.total_score : null;
     if (!within(total, filters.totalMin, filters.totalMax)) return false;
+    // Both are stored per application, and both are absent until a reviewer's scores are uploaded,
+    // so a bound on either drops the applications that have no such number.
+    if (!within(app.reviewer_total ?? null, filters.reviewerMin, filters.reviewerMax)) return false;
+    if (!within(app.score_gap ?? null, filters.gapMin, filters.gapMax)) return false;
     return true;
   });
 }
 
-function contains(value: string | null, term: string): boolean {
+/** Whether a text field matches a filter box. An empty box matches everything. */
+export function contains(value: string | null, term: string): boolean {
   if (!term) return true;
   return (value ?? "").toLowerCase().includes(term.toLowerCase());
 }
 
 // A missing number fails a bound rather than passing it, so a range never quietly includes
 // applications that have no such number.
-function within(value: number | null, min: string, max: string): boolean {
+export function within(value: number | null, min: string, max: string): boolean {
   if (min && (value === null || Number.isNaN(value) || value < Number(min))) return false;
   if (max && (value === null || Number.isNaN(value) || value > Number(max))) return false;
   return true;

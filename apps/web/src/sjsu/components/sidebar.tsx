@@ -1,4 +1,10 @@
-import { LayoutDashboard, GraduationCap, ClipboardCheck, Settings } from "lucide-react";
+import {
+  LayoutDashboard,
+  GraduationCap,
+  ClipboardCheck,
+  ScrollText,
+  Settings,
+} from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -8,12 +14,13 @@ import {
 import { Avatar, AvatarFallback } from "@/sjsu/components/ui/avatar";
 import { Button } from "@/sjsu/components/ui/button";
 
-// 52px icon rail. no auth yet, so nav is lifted to App (no router) and the
-// avatar is a static initial.
+// 52px icon rail. There is no router, so nav is lifted to App, and the mark at the top is the
+// app's own rather than the signed-in person's.
 const NAV_ITEMS = [
   { key: "overview", label: "Dashboard", icon: LayoutDashboard },
   { key: "scholarships", label: "Scholarships", icon: GraduationCap },
-  { key: "reviews", label: "Reviews", icon: ClipboardCheck },
+  { key: "reviews", label: "Review queue", icon: ClipboardCheck },
+  { key: "rubrics", label: "Rubrics", icon: ScrollText },
 ];
 
 export function Sidebar({
@@ -30,7 +37,7 @@ export function Sidebar({
       <aside className="flex w-[52px] flex-col items-center py-4" style={{ backgroundColor: 'var(--sjsu-blue)' }}>
         <Tooltip>
           <TooltipTrigger asChild>
-            <span aria-label="Profile">
+            <span aria-label="SJSU Review">
               <Avatar size="sm">
                 <AvatarFallback className="bg-white/20 text-white text-xs font-bold">SJ</AvatarFallback>
               </Avatar>
@@ -49,6 +56,7 @@ export function Sidebar({
                     variant="ghost"
                     size="icon-lg"
                     onClick={() => onNavigate(navItem.key)}
+                    aria-label={navItem.label}
                     className={
                       isActive
                         ? "bg-white/20 text-white"
@@ -64,20 +72,23 @@ export function Sidebar({
           })}
         </nav>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-lg"
-              onClick={onOpenSettings}
-              aria-label="Settings"
-              className="text-white/60 hover:text-white hover:bg-white/10"
-            >
-              <Settings className="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Settings</TooltipContent>
-        </Tooltip>
+        {/* There are no settings yet. A gear that does nothing when pressed reads as broken. */}
+        {onOpenSettings && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-lg"
+                onClick={onOpenSettings}
+                aria-label="Settings"
+                className="text-white/60 hover:text-white hover:bg-white/10"
+              >
+                <Settings className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">Settings</TooltipContent>
+          </Tooltip>
+        )}
       </aside>
     </TooltipProvider>
   );

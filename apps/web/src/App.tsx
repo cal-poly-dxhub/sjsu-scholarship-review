@@ -3,6 +3,7 @@ import { AppLayout } from "./sjsu/app/layout";
 import { ScholarshipsPage } from "./features/scholarships/scholarships-page";
 import { ReviewsPage } from "./features/reviews/reviews-page";
 import { DashboardPage } from "./features/dashboard/dashboard-page";
+import { RubricsPage } from "./features/rubrics/rubrics-page";
 
 // no router yet — nav is a single piece of state that picks the page
 export function App() {
@@ -12,6 +13,7 @@ export function App() {
       {view === "overview" && <DashboardPage />}
       {view === "scholarships" && <ScholarshipsPage />}
       {view === "reviews" && <ReviewsPage />}
+      {view === "rubrics" && <RubricsPage />}
     </AppLayout>
   );
 }

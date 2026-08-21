@@ -13,8 +13,21 @@
   @media (width >= 1400px) {
     max-width: 1400px;
   }
-  @media (width >= 800px) {
-    max-width: 800px;
+}
+
+/* The box long-form text is read in, and the one place its width is set. It is a share of the room
+   the box is given rather than a count of characters, so the same sentence reads the same way in a
+   card, in a resizable pane, and in a narrow window, and it widens when the thing around it does.
+   The padding is part of the measure: it keeps the last word off whatever sits beside it. */
+@utility reading {
+  width: 100%;
+  min-width: 0;
+  padding-right: 1.5rem;
+  @media (width >= --theme(--breakpoint-lg)) {
+    width: 80%;
+  }
+  @media (width >= --theme(--breakpoint-2xl)) {
+    width: 66.667%;
   }
 }
 
@@ -148,11 +161,6 @@
 }
 .radix-themes {
   --focus-8: #0f172a !important;
-}
-
-html, body {
-  overflow-x: hidden;
-  max-width: 100vw;
 }
 
 body {

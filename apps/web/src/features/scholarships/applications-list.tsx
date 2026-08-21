@@ -13,8 +13,12 @@ import {
 import { SortableHead } from "@/sjsu/components/ui/sortable-head";
 import { Checkbox } from "@/sjsu/components/ui/checkbox";
 import { EmptyState } from "@/sjsu/components/empty-state";
-import { TableEmptyOverlay } from "@/sjsu/components/table-empty-overlay";
+import { hasEmptyMessage, TableEmptyOverlay } from "@/sjsu/components/table-empty-overlay";
+import { FilterInput, FilterRange } from "@/sjsu/components/filter-controls";
+import { NO_REVIEWER_SCORES, NotStored } from "@/sjsu/components/not-built";
+import { Paging } from "@/sjsu/components/paging";
 import { useTableSort } from "@/sjsu/lib/use-table-sort";
+import { useScholarshipName } from "@/features/cohorts/cohort-picker";
 import { cohortExport, download, fetchReasoning, reasoningBatches } from "./export";
 import { EMPTY_FILTERS, isFiltering, listRows } from "./list-rows";
 import { STATE_LABELS, hasCurrentScore, scoreState } from "./score-state";
@@ -40,6 +44,12 @@ interface Application {
   latest_scored_at: string | null;
   claimed_until: string | null;
   failure: string | null;
+  /** The average of the reviewers whose scores add up to a total comparable with the model's. */
+  reviewer_total: number | null;
+  reviewer_count: number | null;
+  /** How many reviewers' scores are stored, comparable or not. */
+  reviewers_stored: number | null;
+  score_gap: number | null;
 }
 
 interface CohortResponse {
@@ -73,19 +83,27 @@ type SortField = "total";
 const PAGE_SIZE = 200;
 
 const SEARCH_COVERS =
-  "Search covers the applicant id, program, level, major, and GPA. It does not reach the essays.";
+  "Search covers applicant ID, program, level, major, and GPA — not the essays.";
+
+// The comparison group, in order. One list drives the headers and the cells so the two cannot
+// drift apart. "Final" is a signed-off score, and sign-off is not built.
+const COMPARISON_COLUMNS = ["Reviewer", "Model", "Final", "Score gap", "Flagged"];
 
 export function ApplicationsList({
   scholarship,
   year,
   onBack,
   onSelectApp,
+  onScoreApp,
 }: {
   scholarship: string;
   year: string;
   onBack: () => void;
   onSelectApp: (studentUuid: string) => void;
+  /** Open one application on the hand-scoring screen. */
+  onScoreApp: (studentUuid: string) => void;
 }) {
+  const named = useScholarshipName(scholarship);
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [showFilters, setShowFilters] = useState(false);
@@ -94,6 +112,9 @@ export function ApplicationsList({
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [pickedVersion, setPickedVersion] = useState<string | null>(null);
   const [withReasoning, setWithReasoning] = useState(false);
+  // Off by default, and remembered nowhere: the list a reviewer works from is the list they have
+  // now, and every cell the group adds is empty.
+  const [comparing, setComparing] = useState(false);
   const [exporting, setExporting] = useState<{ done: number; total: number } | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
@@ -105,6 +126,15 @@ export function ApplicationsList({
   const direction = sortDir === "desc" ? "highest" : "lowest";
   const activeFilters = Object.values(filters).filter(Boolean).length;
   const filtering = isFiltering(search, filters);
+
+  // Only for the line the server draws between agreeing and disagreeing, and only while the
+  // comparison columns are on. The figures it carries belong to the dashboard.
+  const agreementQuery = useQuery({
+    queryKey: ["agreement"],
+    queryFn: () => api<{ disagreement_line: number }>("/agreement"),
+    enabled: comparing,
+  });
+  const line = agreementQuery.data?.disagreement_line ?? null;
 
   const cohortQuery = useQuery({
     queryKey: ["cohort", scholarship, year],
@@ -158,11 +188,24 @@ export function ApplicationsList({
   // Ranked pages come off the server already sized; a cohort listing is cut here.
   const shown = rankedRead ? matched : matched.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const firstOnPage = page * PAGE_SIZE;
+  const hasNext = rankedRead
+    ? Boolean(rankedQuery.data?.cursor)
+    : (page + 1) * PAGE_SIZE < matched.length;
 
   const isLoading = cohortQuery.isLoading || (rankedRead && rankedQuery.isLoading);
   const isError = cohortQuery.isError || (rankedRead && rankedQuery.isError);
 
+  const tableState = {
+    isLoading,
+    isError,
+    unfilteredCount: cohortQuery.data?.total ?? 0,
+    showFilterEmpty: matched.length === 0,
+  };
+
   const states = cohortQuery.data?.states;
+  const withReviewerScores = (cohortQuery.data?.applications ?? []).filter(
+    (app) => app.reviewers_stored,
+  ).length;
   const otherVersions = Object.entries(scoredByVersion)
     .filter(([name]) => name !== version)
     .reduce((sum, [, count]) => sum + count, 0);
@@ -226,11 +269,11 @@ export function ApplicationsList({
         </Button>
         <div className="flex-1">
           <h1 className="text-2xl font-semibold tracking-tight">
-            {scholarship} · {year}
+            {named} · {year}
           </h1>
           <p className="text-sm text-muted-foreground">
             {matched.length} of {cohortQuery.data?.total ?? 0} applications
-            {rankedRead ? `, ${direction} scores first` : ", in the order they are stored"}
+            {rankedRead ? `, ${direction} scores first` : ", in no particular order"}
           </p>
         </div>
         <Button
@@ -246,18 +289,18 @@ export function ApplicationsList({
       {states && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant="secondary">{scoredByVersion[version ?? ""] ?? 0} ranked</Badge>
-          <Badge variant="outline">{states.unscored} unscored</Badge>
-          <Badge variant="outline">{states.running} running</Badge>
+          <Badge variant="outline">{states.unscored} not scored yet</Badge>
+          <Badge variant="outline">{states.running} being scored</Badge>
           <Badge variant={states.failed > 0 ? "warning" : "outline"}>{states.failed} failed</Badge>
           <Badge variant="outline">{otherVersions} scored under an older version</Badge>
-          <span>Nothing here is signed off — reviewer sign-off is not built.</span>
+          <span>Sign-off is not available yet, so nothing here is signed off.</span>
         </div>
       )}
 
       <div className="flex flex-wrap items-end gap-3">
-        <div className="flex-1 min-w-64">
+        <div className="min-w-64 flex-1 max-w-xl">
           <Input
-            placeholder="Search applicant id, program, level, major, GPA"
+            placeholder="Search applicant ID, program, level, major, GPA"
             value={search}
             onChange={(event) => {
               setSearch(event.target.value);
@@ -285,12 +328,12 @@ export function ApplicationsList({
           </div>
         )}
       </div>
-      <p className="text-xs text-muted-foreground">{cohortQuery.data?.searchable ?? SEARCH_COVERS}</p>
+      {/* Our own wording, not the server's: the read sends a line naming its stored fields. */}
+      <p className="text-xs text-muted-foreground">{SEARCH_COVERS}</p>
       {ranking && filtering && (
-        <p className="text-xs text-muted-foreground">
-          Searching covers the whole cohort, so these rows are in stored order, not ranked order.
-          An unscored or failed applicant is findable here. Clear the search and the filters to go
-          back to the ranking.
+        <p className="reading text-xs text-muted-foreground">
+          Search results are not ranked, so applicants with no score and applicants that failed
+          show up too. Clear the search and the filters to go back to the ranking.
         </p>
       )}
 
@@ -303,7 +346,7 @@ export function ApplicationsList({
         >
           {exporting
             ? "Exporting…"
-            : `Export ${matched.length} shown as JSON`}
+            : `Export these ${matched.length} as JSON`}
         </Button>
         <Label className="flex items-center gap-2 text-xs">
           <Checkbox
@@ -314,17 +357,35 @@ export function ApplicationsList({
         </Label>
         {withReasoning && (
           <span className="text-xs text-muted-foreground">
-            {toRead} applications will have their score item read, one request per hundred. The
-            file is larger and the export takes longer.
+            Adds the reasoning for {toRead} applications. The file is bigger and takes longer to
+            build.
           </span>
         )}
         {exporting && exporting.total > 0 && (
           <span className="text-xs text-muted-foreground">
-            {exporting.done} of {exporting.total} score items read
+            {exporting.done} of {exporting.total} applications read
           </span>
         )}
         {exportError && <span className="text-xs text-warning">{exportError}</span>}
+        <Label className="flex items-center gap-2 text-xs">
+          <Checkbox
+            checked={comparing}
+            onCheckedChange={(checked) => setComparing(checked === true)}
+          />
+          Compare with a reviewer's score
+        </Label>
       </div>
+      {comparing && (
+        <p className="reading text-xs text-muted-foreground">
+          {withReviewerScores === 0
+            ? `${NO_REVIEWER_SCORES} Upload them from the dashboard.`
+            : `${withReviewerScores} of these applications have a reviewer's score. ` +
+              (line === null
+                ? ""
+                : `A gap of ${line} points or more out of 100 is flagged for a second look.`) +
+              " A final score needs sign-off, which is not built."}
+        </p>
+      )}
 
       {showFilters && (
         <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
@@ -343,7 +404,7 @@ export function ApplicationsList({
               </Button>
             )}
           </div>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4 xl:grid-cols-6">
             <FilterInput
               label="Program"
               value={filters.program}
@@ -366,8 +427,6 @@ export function ApplicationsList({
               onMinChange={(value) => changeFilter("gpaMin", value)}
               onMaxChange={(value) => changeFilter("gpaMax", value)}
             />
-            {/* The old human, AI, and variance filters are gone: one stored total per application
-                is all the model keeps, and no second opinion exists to differ from. */}
             <FilterRange
               label="Total score"
               min={filters.totalMin}
@@ -375,56 +434,82 @@ export function ApplicationsList({
               onMinChange={(value) => changeFilter("totalMin", value)}
               onMaxChange={(value) => changeFilter("totalMax", value)}
             />
+            {/* The model's own range is the total score above, so it is not repeated here. */}
+            <FilterRange
+              label="Reviewer score"
+              min={filters.reviewerMin}
+              max={filters.reviewerMax}
+              onMinChange={(value) => changeFilter("reviewerMin", value)}
+              onMaxChange={(value) => changeFilter("reviewerMax", value)}
+            />
+            <FilterRange
+              label="Score gap"
+              min={filters.gapMin}
+              max={filters.gapMax}
+              onMinChange={(value) => changeFilter("gapMin", value)}
+              onMaxChange={(value) => changeFilter("gapMax", value)}
+            />
           </div>
         </div>
       )}
 
+      {/* Asked here and not inside: when there is no message the wrapper must leave the table
+          alone, rows and all. */}
       <EmptyState
         overlay={
-          <TableEmptyOverlay
-            isLoading={isLoading}
-            isError={isError}
-            unfilteredCount={cohortQuery.data?.total ?? 0}
-            showFilterEmpty={matched.length === 0}
-            error={{
-              icon: <TriangleAlert className="size-5" />,
-              title: "The cohort did not load",
-              subtitle: "The read failed. Try again, and check the scholarship and year.",
-            }}
-            empty={{
-              icon: <Search className="size-5" />,
-              title: "No applications here yet",
-              subtitle: `Nothing is stored for ${scholarship} ${year}. Upload its workbook first.`,
-            }}
-            filterEmpty={{
-              icon: <Search className="size-5" />,
-              title: "Nothing matched",
-              subtitle: SEARCH_COVERS,
-            }}
-          />
+          hasEmptyMessage(tableState) && (
+            <TableEmptyOverlay
+              {...tableState}
+              error={{
+                icon: <TriangleAlert className="size-5" />,
+                title: "We could not load this cohort",
+                subtitle: "Try again, and check the scholarship and year are the ones you want.",
+              }}
+              empty={{
+                icon: <Search className="size-5" />,
+                title: "No applications here yet",
+                subtitle: `There are no applications for ${named} ${year} yet. Upload its export first.`,
+              }}
+              filterEmpty={{
+                icon: <Search className="size-5" />,
+                title: "Nothing matched",
+                subtitle: SEARCH_COVERS,
+              }}
+            />
+          )
         }
       >
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="w-12">#</TableHead>
-              <TableHead className="w-40">Applicant</TableHead>
-              <TableHead className="w-32">Program</TableHead>
-              <TableHead className="w-24">Level</TableHead>
-              <TableHead className="w-44">Major</TableHead>
-              <TableHead className="w-16">GPA</TableHead>
-              <SortableHead field="total" {...sortProps} className="w-28">
+              <TableHead>#</TableHead>
+              <TableHead>Applicant</TableHead>
+              <TableHead>Program</TableHead>
+              <TableHead>Level</TableHead>
+              <TableHead>Major</TableHead>
+              <TableHead>GPA</TableHead>
+              <SortableHead field="total" {...sortProps}>
                 Total
               </SortableHead>
+              {/* Criterion names are long and the scores under them are short, so a name wraps
+                  rather than holding its column open to the length of the name. */}
               {criteria.map((criterion) => (
-                <TableHead key={criterion.id} className="w-20">
+                <TableHead key={criterion.id} className="whitespace-normal leading-tight">
                   {/* Names, maxima, and weights come off the published rubric, never from here. */}
-                  <span title={`${criterion.name} · max ${criterion.max} · weight ${criterion.weight}`}>
+                  <span
+                    title={`${criterion.name} — out of ${criterion.max}, weight ${criterion.weight}`}
+                  >
                     {criterion.name}
                   </span>
                 </TableHead>
               ))}
-              <TableHead className="w-28">State</TableHead>
+              {/* Appended, never interleaved, so turning the group off gives back this table. */}
+              {comparing &&
+                COMPARISON_COLUMNS.map((column) => (
+                  <TableHead key={column}>{column}</TableHead>
+                ))}
+              <TableHead>Status</TableHead>
+              <TableHead />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -440,17 +525,17 @@ export function ApplicationsList({
                 >
                   <TableCell className="text-muted-foreground">{firstOnPage + index + 1}</TableCell>
                   <TableCell className="font-mono text-xs">{app.student_uuid.slice(0, 8)}…</TableCell>
-                  <TableCell className="truncate">{app.academic_program ?? "—"}</TableCell>
-                  <TableCell className="truncate">{app.academic_level ?? "—"}</TableCell>
-                  <TableCell className="truncate">{app.major ?? "—"}</TableCell>
+                  {/* Read in full, not cut to a width picked here. Fourteen columns do not fit a
+                      laptop, and the table scrolling sideways is the answer to that — an ellipsis
+                      hides the value even when the window had room for it. */}
+                  <TableCell>{app.academic_program ?? "—"}</TableCell>
+                  <TableCell>{app.academic_level ?? "—"}</TableCell>
+                  <TableCell>{app.major ?? "—"}</TableCell>
                   <TableCell className="tabular-nums">{app.gpa ?? "—"}</TableCell>
+                  {/* No badge per row: the line above the table already says nothing here is
+                      signed off, and thirty copies of it cost the scores their room. */}
                   <TableCell className="tabular-nums font-medium">
                     {current ? app.total_score : "—"}
-                    {current && (
-                      <Badge variant="outline" className="ml-2">
-                        unreviewed
-                      </Badge>
-                    )}
                   </TableCell>
                   {criteria.map((criterion) => {
                     const score = current ? app.category_scores?.[criterion.id] : undefined;
@@ -460,8 +545,23 @@ export function ApplicationsList({
                       </TableCell>
                     );
                   })}
+                  {comparing && <ComparisonCells app={app} current={current} line={line} />}
                   <TableCell>
                     <StateBadge app={app} />
+                  </TableCell>
+                  <TableCell>
+                    {/* The row opens the application to read. This opens it to score, so the
+                        click must not do both. */}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onScoreApp(app.student_uuid);
+                      }}
+                    >
+                      Score
+                    </Button>
                   </TableCell>
                 </TableRow>
               );
@@ -470,32 +570,92 @@ export function ApplicationsList({
         </Table>
       </EmptyState>
 
-      <Paging
-        page={page}
-        showing={shown.length}
-        hasNext={
-          rankedRead
-            ? Boolean(rankedQuery.data?.cursor)
-            : (page + 1) * PAGE_SIZE < matched.length
-        }
-        onPrevious={() => setPage((current) => Math.max(0, current - 1))}
-        onNext={() => {
-          if (rankedRead) {
-            const marker = rankedQuery.data?.cursor ?? null;
-            setCursors((current) =>
-              current.length > page + 1 ? current : [...current, marker],
-            );
-          }
-          setPage((current) => current + 1);
-        }}
-      />
+      {(page > 0 || hasNext) && (
+        <Paging
+          page={page}
+          showing={shown.length}
+          hasNext={hasNext}
+          onPrevious={() => setPage((current) => Math.max(0, current - 1))}
+          onNext={() => {
+            if (rankedRead) {
+              const marker = rankedQuery.data?.cursor ?? null;
+              setCursors((current) =>
+                current.length > page + 1 ? current : [...current, marker],
+              );
+            }
+            setPage((current) => current + 1);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * The reviewer-against-model cells for one row, in the header's order.
+ *
+ * Three of the five are stored and two are not: a final score needs sign-off, and whether an
+ * application is flagged is a comparison against the line the server draws — without that line the
+ * cell says nothing rather than guessing at one.
+ */
+function ComparisonCells({
+  app,
+  current,
+  line,
+}: {
+  app: Application;
+  current: boolean;
+  line: number | null;
+}) {
+  const gap = app.score_gap;
+  return (
+    <>
+      <TableCell className="tabular-nums">
+        {app.reviewer_total ?? (app.reviewers_stored ? <NotComparable /> : <NotStored />)}
+        {app.reviewer_count !== null && app.reviewer_count > 1 && (
+          <span className="ml-1 text-xs text-muted-foreground">avg of {app.reviewer_count}</span>
+        )}
+      </TableCell>
+      <TableCell className="tabular-nums">{current ? app.total_score : "—"}</TableCell>
+      {/* A final score is a signed-off one, and nothing here is signed off. */}
+      <TableCell className="tabular-nums">
+        <NotStored />
+      </TableCell>
+      <TableCell className="tabular-nums">{gap ?? <NotStored />}</TableCell>
+      <TableCell>
+        {gap === null || line === null ? (
+          <NotStored />
+        ) : gap >= line ? (
+          <Badge variant="warning">Flagged</Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground">No</span>
+        )}
+      </TableCell>
+    </>
+  );
+}
+
+/** A reviewer scored it, but their scores do not add up to a total the model's can be read against. */
+function NotComparable() {
+  return (
+    <span
+      className="text-xs text-muted-foreground"
+      title="A reviewer's scores are stored, but they do not add up to a total comparable with the model's — a criterion was skipped, or a score was outside its maximum."
+    >
+      Not comparable
+    </span>
   );
 }
 
 function StateBadge({ app }: { app: Application }) {
   const state = scoreState(app);
-  if (state === "scored") return <Badge variant="secondary">{app.rubric_version}</Badge>;
+  if (state === "scored") {
+    return (
+      <Badge variant="secondary" title={`Scored under rubric version ${app.rubric_version}`}>
+        {app.rubric_version}
+      </Badge>
+    );
+  }
   if (state === "failed" || state === "needs_rescore") {
     return <Badge variant="warning">{STATE_LABELS[state]}</Badge>;
   }
@@ -504,89 +664,4 @@ function StateBadge({ app }: { app: Application }) {
   );
 }
 
-function Paging({
-  page,
-  showing,
-  hasNext,
-  onPrevious,
-  onNext,
-}: {
-  page: number;
-  showing: number;
-  hasNext: boolean;
-  onPrevious: () => void;
-  onNext: () => void;
-}) {
-  if (page === 0 && !hasNext) return null;
-  return (
-    <div className="flex items-center justify-between">
-      <p className="text-sm text-muted-foreground">
-        Page {page + 1} · {showing} applications
-      </p>
-      <div className="flex gap-2">
-        <Button variant="outline" size="sm" disabled={page === 0} onClick={onPrevious}>
-          Previous
-        </Button>
-        <Button variant="outline" size="sm" disabled={!hasNext} onClick={onNext}>
-          Next
-        </Button>
-      </div>
-    </div>
-  );
-}
 
-function FilterInput({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div>
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      <Input
-        className="mt-1"
-        value={value}
-        placeholder="Search…"
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </div>
-  );
-}
-
-function FilterRange({
-  label,
-  min,
-  max,
-  onMinChange,
-  onMaxChange,
-}: {
-  label: string;
-  min: string;
-  max: string;
-  onMinChange: (value: string) => void;
-  onMaxChange: (value: string) => void;
-}) {
-  return (
-    <div>
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      <div className="mt-1 flex gap-1.5">
-        <Input
-          type="number"
-          value={min}
-          placeholder="Min"
-          onChange={(event) => onMinChange(event.target.value)}
-        />
-        <Input
-          type="number"
-          value={max}
-          placeholder="Max"
-          onChange={(event) => onMaxChange(event.target.value)}
-        />
-      </div>
-    </div>
-  );
-}
