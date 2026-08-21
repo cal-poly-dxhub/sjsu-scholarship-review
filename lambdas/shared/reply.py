@@ -35,6 +35,34 @@ class CheckedReply:
 # What Bedrock says when a reply ran into the output token limit.
 CUT_OFF = "max_tokens"
 
+FENCE = "```"
+
+# How much of an unreadable reply the error carries. Without it, a whole cohort fails with a
+# character position and nothing to look at.
+SHOWN = 80
+
+
+def unfenced(raw: str) -> str:
+    """The reply with a markdown code fence taken off, if it came in one.
+
+    Asking for no fence does not stop the model using one, and refusing a fenced reply fails
+    every application in a cohort. Taking the envelope off is not repairing a reply: what is
+    inside it is parsed untouched, and a reply that is wrong inside the fence still fails.
+    """
+    text = raw.strip()
+    if not text.startswith(FENCE):
+        return text
+
+    after_fence = text[len(FENCE) :]
+    # The rest of the opening line is a language tag — ```json — and not part of the object.
+    line_end = after_fence.find("\n")
+    if line_end == -1:
+        return text
+
+    body = after_fence[line_end + 1 :]
+    closing = body.rfind(FENCE)
+    return (body[:closing] if closing != -1 else body).strip()
+
 
 def check_reply(
     raw: str, criteria: list[dict[str, Any]], *, stop_reason: str = ""
@@ -52,9 +80,12 @@ def check_reply(
             " the limit rather than reading this as a bad reply"
         )
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(unfenced(raw))
     except json.JSONDecodeError as error:
-        raise ReplyError(f"the reply is not JSON: {error.msg} at position {error.pos}") from error
+        raise ReplyError(
+            f"the reply is not JSON: {error.msg} at position {error.pos}."
+            f" It starts: {unfenced(raw)[:SHOWN]!r}"
+        ) from error
     if not isinstance(parsed, dict):
         raise ReplyError("the reply is not a JSON object")
 

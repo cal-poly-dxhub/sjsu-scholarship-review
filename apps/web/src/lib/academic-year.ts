@@ -6,7 +6,7 @@
 
 export const YEAR_FORM = "2025-2026";
 
-export const YEAR_HINT = `An academic year is two years running, as in ${YEAR_FORM}.`;
+export const YEAR_HINT = `An academic year is written as two years in a row, like ${YEAR_FORM}.`;
 
 const CANON = /^(\d{4})-(\d{4})$/;
 

@@ -20,9 +20,6 @@
   @media (width >= 1400px) {
     max-width: 1400px;
   }
-  @media (width >= 800px) {
-    max-width: 800px;
-  }
 }
 
 @theme {

@@ -29,7 +29,13 @@ function Table({
       <table
         data-slot="table"
         className={cn(
-          "w-full table-fixed caption-bottom text-sm",
+          // auto layout, not fixed: a fixed table ignores what is in it, so once the
+          // declared column widths stopped fitting the cells' text ran over the column
+          // beside it — and at exactly w-full the container never saw overflow, so a
+          // cut-off column could not be scrolled to. Now the table takes the width its
+          // content needs, fills the container when that is less, and the container
+          // scrolls when it is more.
+          "min-w-full table-auto caption-bottom text-sm",
           zebra && "[&_tbody_tr:nth-child(odd)]:bg-muted/40",
           dividers && "[&_td:not(:first-child)]:border-l [&_th:not(:first-child)]:border-l [&_td]:border-border [&_th]:border-border",
           className,

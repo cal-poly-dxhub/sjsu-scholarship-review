@@ -10,7 +10,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await getApiToken();
   if (!token) {
     await signIn();
-    throw new Error(`Signed out, so ${path} was not called`);
+    throw new Error("You are signed out, so nothing was loaded. Sign in again.");
   }
 
   const headers = new Headers(init?.headers);
@@ -21,9 +21,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   // reviewer goes back through sign-in rather than watching calls fail.
   if (res.status === 401) {
     await signIn();
-    throw new Error(`Sign-in expired on ${path}`);
+    throw new Error("Your sign-in expired. Sign in again to carry on.");
   }
-  if (!res.ok) throw new Error(await refusal(res, path));
+  if (!res.ok) throw new Error(await refusal(res));
   return res.json() as Promise<T>;
 }
 
@@ -31,12 +31,12 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
  * What to show for a refused call. Every handler answers with a `message` saying what was wrong
  * and what to do about it, and a status line on its own tells a person nothing.
  */
-async function refusal(res: Response, path: string): Promise<string> {
+async function refusal(res: Response): Promise<string> {
   try {
     const body = (await res.json()) as { message?: unknown };
     if (typeof body.message === "string" && body.message !== "") return body.message;
   } catch {
-    // No JSON body, so the status is all there is.
+    // No JSON body, so the status code is all there is to go on.
   }
-  return `${res.status} ${res.statusText} on ${path}`;
+  return `Something went wrong (${res.status}). Try again.`;
 }

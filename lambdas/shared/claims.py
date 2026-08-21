@@ -96,7 +96,12 @@ def release(*, pk: str, sk: str, claimed_by: str, reason: str) -> bool:
 
 
 def mark_failed(*, pk: str, sk: str, claimed_by: str, reason: str) -> bool:
-    """Fail an item and clear what a score would have said, so nothing shows a stale score."""
+    """Fail an item and clear what a score would have said, so nothing shows a stale score.
+
+    The gap goes with the total. A gap measured against a total that no longer exists would keep
+    the application in the review queue with nothing on the other side of the comparison. The
+    reviewers' own scores stay where they are — `reviewers_stored` still says they are there.
+    """
     return _let_go(
         pk=pk,
         sk=sk,
@@ -104,7 +109,7 @@ def mark_failed(*, pk: str, sk: str, claimed_by: str, reason: str) -> bool:
         update=(
             "SET #status = :failed, failure = :reason"
             " REMOVE claimed_by, claimed_until, category_scores, total_score, rubric_version,"
-            " rank_pk, latest_scored_at"
+            " rank_pk, latest_scored_at, score_gap, gap_pk, reviewer_total, reviewer_count"
         ),
         values={":failed": FAILED, ":reason": reason},
     )

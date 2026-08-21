@@ -31,10 +31,11 @@ export function hasCurrentScore(app: StatedApplication, now?: string): boolean {
   return scoreState(app, now) === "scored";
 }
 
+/** The dashboard's coverage panel uses these same words, so a state reads the same everywhere. */
 export const STATE_LABELS: Record<ScoreState, string> = {
-  scored: "scored",
-  needs_rescore: "needs rescoring",
-  running: "running",
-  failed: "failed",
-  unscored: "unscored",
+  scored: "Scored",
+  needs_rescore: "Needs scoring again",
+  running: "Being scored",
+  failed: "Could not be scored",
+  unscored: "Not scored yet",
 };

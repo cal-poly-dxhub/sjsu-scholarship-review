@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Button } from "@/sjsu/components/ui/button";
 import { isAcademicYear } from "@/lib/academic-year";
 import { CohortPicker, type CohortChoice } from "@/features/cohorts/cohort-picker";
+import { ReviewDetail } from "@/features/reviews/review-detail";
 import { ApplicationsList } from "./applications-list";
 import { ApplicationDetail } from "./application-detail";
 
@@ -10,18 +11,37 @@ import { ApplicationDetail } from "./application-detail";
  * pair is picked from what has been ingested rather than typed, because the scholarship half is a
  * slug built from the export's wording and a wrong guess reads as an empty cohort.
  */
+
+/** One application, open either to read or to score by hand. */
+interface Open {
+  studentUuid: string;
+  mode: "read" | "score";
+}
+
 export function ScholarshipsPage() {
   const [chosen, setChosen] = useState<CohortChoice>({ scholarship: "", year: "" });
   const [cohort, setCohort] = useState<{ scholarship: string; year: string } | null>(null);
-  const [selectedApp, setSelectedApp] = useState<string | null>(null);
+  const [open, setOpen] = useState<Open | null>(null);
 
-  if (cohort && selectedApp) {
+  if (cohort && open?.mode === "score") {
+    return (
+      <ReviewDetail
+        scholarship={cohort.scholarship}
+        year={cohort.year}
+        studentUuid={open.studentUuid}
+        onBack={() => setOpen(null)}
+      />
+    );
+  }
+
+  if (cohort && open) {
     return (
       <ApplicationDetail
         scholarship={cohort.scholarship}
         year={cohort.year}
-        studentUuid={selectedApp}
-        onBack={() => setSelectedApp(null)}
+        studentUuid={open.studentUuid}
+        onBack={() => setOpen(null)}
+        onScore={() => setOpen({ studentUuid: open.studentUuid, mode: "score" })}
       />
     );
   }
@@ -32,7 +52,8 @@ export function ScholarshipsPage() {
         scholarship={cohort.scholarship}
         year={cohort.year}
         onBack={() => setCohort(null)}
-        onSelectApp={setSelectedApp}
+        onSelectApp={(studentUuid) => setOpen({ studentUuid, mode: "read" })}
+        onScoreApp={(studentUuid) => setOpen({ studentUuid, mode: "score" })}
       />
     );
   }

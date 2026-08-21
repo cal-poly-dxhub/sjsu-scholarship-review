@@ -44,6 +44,20 @@ export function useCohorts(options?: { refetchInterval?: number | false }) {
 }
 
 /**
+ * The wording the export used for a scholarship, for a screen holding only the stored name. Off
+ * the same cached list, so it costs no request. A name that is not on the list is given back as it
+ * came — the only way to hold one is to have typed it, and echoing someone their own words is
+ * better than showing them nothing.
+ */
+export function useScholarshipName(scholarship: string): string {
+  const cohorts = useCohorts();
+  const found = (cohorts.data?.cohorts ?? []).find(
+    (cohort) => cohort.scholarship === scholarship,
+  );
+  return found?.display_name ?? scholarship;
+}
+
+/**
  * Pick a cohort that exists, rather than typing one. A cohort's slug comes from the export's own
  * wording — "SJSU General Scholarships" is stored as `sjsu_general_scholarships` — so a typed
  * guess reads as an empty cohort with nothing to say it was a guess.
@@ -108,7 +122,7 @@ export function CohortPicker({
               }}
             >
               <NativeSelectOption value="">
-                {cohorts.isLoading ? "reading the cohorts…" : "pick a cohort"}
+                {cohorts.isLoading ? "Loading the cohorts…" : "Pick a cohort"}
               </NativeSelectOption>
               {list.map((cohort) => (
                 <NativeSelectOption key={cohortKey(cohort)} value={cohortKey(cohort)}>
@@ -125,14 +139,15 @@ export function CohortPicker({
 
       {empty && (
         <p className="text-sm text-muted-foreground">
-          Nothing has been ingested yet, so there is no cohort to pick. Upload an export and this
-          becomes a list — the file's name gives the year and its rows give the scholarship.
+          No export has been uploaded yet, so there is no cohort to pick. Upload one and this
+          becomes a list.
         </p>
       )}
       {byHand && !empty && (
         <p className="text-sm text-muted-foreground">
-          A slug is the export's wording, lowercased, with runs of anything else as one underscore:
-          "SJSU General Scholarships" is <code>sjsu_general_scholarships</code>.
+          {/* Without this a typo reads as an empty cohort, with nothing saying it was a typo. */}
+          A typed cohort only finds anything if it matches one that was uploaded, exactly. Picking
+          from the list is safer.
         </p>
       )}
       {byHand && value.year !== "" && !isAcademicYear(value.year) && (
@@ -142,7 +157,7 @@ export function CohortPicker({
         <p className="text-sm text-warning">
           {cohorts.error instanceof Error
             ? cohorts.error.message
-            : "The cohorts could not be read"}
+            : "We could not load the list of cohorts."}
         </p>
       )}
     </div>

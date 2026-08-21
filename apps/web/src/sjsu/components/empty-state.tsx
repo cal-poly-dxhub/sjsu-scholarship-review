@@ -34,11 +34,17 @@ export function EmptyState({
       style={{ minHeight }}
     >
       {children}
-      <div className={cn("pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent", FADE[surface])} />
+      {/* No overlay means the children speak for themselves, so nothing goes over them: a fade
+          over readable rows only washes them out, and the layer would swallow their clicks. Where
+          there is an overlay, the layer still takes no pointer events so whatever sits inside it
+          can take them back. */}
       {overlay && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center">
-          {overlay}
-        </div>
+        <>
+          <div className={cn("pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent", FADE[surface])} />
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center *:pointer-events-auto">
+            {overlay}
+          </div>
+        </>
       )}
     </div>
   );

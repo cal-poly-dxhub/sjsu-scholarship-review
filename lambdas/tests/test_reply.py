@@ -70,6 +70,25 @@ def test_a_cut_off_reply_is_told_apart_by_what_the_model_said() -> None:
         check_reply(reply([("grit", 1), ("clarity", 4)]), FIXTURE_CRITERIA, stop_reason="max_tokens")
 
 
+def test_a_fenced_reply_is_read_and_a_wrong_one_inside_a_fence_still_fails() -> None:
+    """The model answers in a ```json fence however plainly the prompt asks it not to.
+
+    Every application in the 2026-2027 cohort failed on this. What the fence must not do is
+    become a way in for a reply that is wrong: the object inside is checked exactly as a bare
+    one is, and the error says what came back so a whole cohort cannot fail invisibly again.
+    """
+    good = reply([("grit", 1), ("clarity", 4)])
+    assert check_reply(f"```json\n{good}\n```", FIXTURE_CRITERIA).scores[0].score == 1
+    # A bare fence with no language tag, and whitespace around the whole thing.
+    assert check_reply(f"  ```\n{good}\n```  ", FIXTURE_CRITERIA).scores[1].score == 4
+
+    with pytest.raises(ReplyError, match="outside 0-2"):
+        check_reply(f"```json\n{reply([('grit', 4), ('clarity', 4)])}\n```", FIXTURE_CRITERIA)
+
+    with pytest.raises(ReplyError, match="It starts: 'I cannot score"):
+        check_reply("I cannot score this application.", FIXTURE_CRITERIA)
+
+
 @pytest.mark.parametrize(
     ("scores", "complaint"),
     [

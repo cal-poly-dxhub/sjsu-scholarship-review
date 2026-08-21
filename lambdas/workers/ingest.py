@@ -1,7 +1,7 @@
 """Ingest worker: an uploaded export becomes application items in a cohort partition.
 
-The export is a workbook or a CSV. Only the decoding differs; the header check, the column
-map, and everything after them are shared, so the two formats cannot drift apart.
+The export is a workbook or a CSV, read as rows by `shared.rows` — the same reader the
+reviewer-score ingest uses, so neither format nor either kind of file can drift apart.
 
 Every write is an `update_item`, never a `put_item`. A re-ingest of the same export has
 to leave `category_scores`, `total_score`, and `rubric_version` where they are — a put
@@ -15,19 +15,15 @@ essays is not comparable to the rest of the cohort.
 
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
 import json
 import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-import boto3
-import openpyxl
-
 from shared.claims import PARSED
+from shared.rows import RowsError, cell, number_or_none, read_rows
 from shared.rubric import slug
 from shared.table import (
     COHORTS_PK,
@@ -82,8 +78,9 @@ ESSAYS = [
 OWNED = ("academic_program", "major", "academic_level", "gpa", "qa_pairs")
 
 
-class IngestError(Exception):
-    """The file cannot be ingested at all. Nothing was written."""
+# The worker's own name for a file it cannot read. Same error the shared reader raises, so a
+# caller catching either one catches both.
+IngestError = RowsError
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -107,7 +104,7 @@ def ingest_file(bucket: str, key: str) -> dict[str, Any]:
     filename = key.split("/")[-1]
     year = year_from(filename)
 
-    rows = read_rows(bucket, key)
+    rows = read_rows(bucket, key, columns=COLUMNS, what="export")
     applications, skipped, duplicates, names = collect(rows, year=year, source_file=key)
 
     written = 0
@@ -146,54 +143,6 @@ def year_from(filename: str) -> str:
         return year_in_filename(filename)
     except YearFormat as error:
         raise IngestError(str(error)) from error
-
-
-def read_rows(bucket: str, key: str) -> Iterator[dict[str, Any]]:
-    """Rows as dicts keyed by the header line, from a workbook or a CSV."""
-    body = boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
-    raw = csv_rows(body) if key.endswith(".csv") else workbook_rows(body)
-
-    try:
-        header = next(raw)
-    except StopIteration:
-        raise IngestError(f"'{key}' is empty — no header row.") from None
-
-    names = [str(cell).strip() if cell is not None else "" for cell in header]
-    if not any(column in names for column in COLUMNS):
-        # Without this, a file whose first row is data reads as a file full of unusable rows and
-        # the run reports a clean nothing.
-        raise IngestError(
-            f"'{key}' names none of the export's columns in its first row, so it has no header"
-            " row to read the rest by."
-        )
-
-    for row in raw:
-        yield {names[i]: row[i] for i in range(min(len(names), len(row)))}
-
-
-def workbook_rows(body: bytes) -> Iterator[tuple[Any, ...]]:
-    """The first sheet's rows. Read-only so a large workbook stays cheap."""
-    sheet = openpyxl.load_workbook(io.BytesIO(body), read_only=True, data_only=True).worksheets[0]
-    return sheet.iter_rows(values_only=True)
-
-
-def csv_rows(body: bytes) -> Iterator[list[str]]:
-    """The CSV's rows, read by the `csv` module because most essays hold line breaks."""
-    # newline="" so the reader sees the line endings itself — nothing else gets a chance to
-    # translate a break inside a quoted essay into the end of a record.
-    return iter(csv.reader(io.StringIO(decode(body), newline="")))
-
-
-def decode(body: bytes) -> str:
-    """CSV text, UTF-8 if it is UTF-8 and Windows-1252 if it is not."""
-    try:
-        return body.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        # Scholarship Manager writes curly apostrophes as cp1252, which strict UTF-8 refuses —
-        # one byte would fail the whole intake. cp1252 is second, not first, because it maps
-        # every byte and so can never raise: a real UTF-8 export read this way would come
-        # through as mojibake with nothing to say it had.
-        return body.decode("cp1252")
 
 
 def collect(
@@ -339,10 +288,13 @@ def store(application: dict[str, Any]) -> str:
     table().update_item(
         Key={"pk": application["pk"], "sk": application["sk"]},
         # The score item stays readable. What goes is the ranking entry and the stored
-        # version, so a total made from older text is not compared against the cohort.
+        # version, so a total made from older text is not compared against the cohort — and
+        # with them the gap, which was measured against that total. The reviewers' own scores
+        # stay: a reviewer read the essays, and the essays are what changed.
         UpdateExpression=(
             "SET " + ", ".join(sets) + " REMOVE rank_pk, rubric_version, claimed_by,"
-            " claimed_until, failure, last_error"
+            " claimed_until, failure, last_error, score_gap, gap_pk, reviewer_total,"
+            " reviewer_count"
         ),
         ExpressionAttributeNames={"#status": "status", "#year": "year", "#source": "source"},
         ExpressionAttributeValues=to_dynamo(values),
@@ -356,22 +308,3 @@ def content_hash(application: dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
-
-
-def cell(value: Any) -> str | None:
-    """Cell text with the spreadsheet's artifacts taken off. Blank reads as nothing."""
-    if value is None:
-        return None
-    if isinstance(value, float) and value == int(value):
-        return str(int(value))
-    text = str(value).strip()
-    return text or None
-
-
-def number_or_none(text: str | None) -> float | None:
-    if text is None:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None

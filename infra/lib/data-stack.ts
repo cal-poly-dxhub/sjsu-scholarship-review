@@ -10,10 +10,19 @@ export const BUCKET_PREFIXES = {
   uploads: 'uploads/',
   /** Bedrock batch job input and output. Only the batch worker touches it. */
   batch: 'batch/',
+  /**
+   * Reviewer-score files a person uploads from the dashboard. The cohort is in the key, because
+   * the office's file names neither the scholarship nor the year:
+   * `reviewer-scores/<scholarship>/<year>/<filename>`.
+   */
+  reviewerScores: 'reviewer-scores/',
 } as const;
 
 /** The ranking index: a cohort's comparable totals, already in score order. */
 export const RANK_INDEX_NAME = 'rank-by-total';
+
+/** The review queue's index: the flagged applications, already widest gap first. */
+export const GAP_INDEX_NAME = 'gap-by-size';
 
 /** Where the dashboard runs while someone is developing it. */
 const DEV_SERVER_ORIGIN = 'http://localhost:3000';
@@ -61,6 +70,33 @@ export class DataStack extends Stack {
         'rubric_version',
         'category_scores',
         'latest_scored_at',
+        'academic_program',
+        'academic_level',
+        'major',
+        'gpa',
+      ],
+    });
+
+    // gap_pk is one constant partition and is written only while an application's gap reaches the
+    // disagreement line, so this index holds the queue and nothing else. Its own index rather than
+    // a second partition on rank-by-total: that index sorts by total_score, and the queue is
+    // ordered by the gap.
+    this.table.addGlobalSecondaryIndex({
+      indexName: GAP_INDEX_NAME,
+      partitionKey: { name: 'gap_pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'score_gap', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      // What the queue's rows show. The applicant's own fields come from the base item only when
+      // someone opens one.
+      nonKeyAttributes: [
+        'student_uuid',
+        'scholarship',
+        'year',
+        'total_score',
+        'reviewer_total',
+        'reviewer_count',
+        'reviewers_stored',
+        'rubric_version',
         'academic_program',
         'academic_level',
         'major',

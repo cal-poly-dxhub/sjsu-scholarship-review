@@ -18,6 +18,10 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 # The ranking index. Named in the CDK as well; both have to say the same thing.
 RANK_INDEX_NAME = "rank-by-total"
 
+# The review queue's index. Its own index and not the ranking one: an index has one sort key,
+# and ordering by the gap is not ordering by the total.
+GAP_INDEX_NAME = "gap-by-size"
+
 # The one form of an academic year, because the year is part of a key: a cohort typed '2026'
 # and a cohort written '25-26' are two partitions, and one of them is always empty.
 YEAR_FORM = "2025-2026"
@@ -112,6 +116,33 @@ def rubric_sk(version: str) -> str:
 
 def rank_pk(scholarship: str, year: str, rubric_version: str) -> str:
     return f"RANK#{scholarship}#{year}#{rubric_version}"
+
+
+def reviewer_sk(reviewer_slug: str) -> str:
+    """One reviewer's scores for one application, beside that application's `SCORE#` items."""
+    return f"REVIEW#{reviewer_slug}"
+
+
+# The queue's one partition on the gap index. Written only while an application is flagged, so
+# the index is the size of the queue and not the size of the table.
+GAP_PK = "GAP"
+
+# One partition holding an ingest's report, so the screen that uploaded can read it back by the
+# key it uploaded to. The uploader is not in the request that ingests.
+REPORTS_PK = "REPORTS"
+
+
+def report_sk(uploaded_key: str) -> str:
+    return f"REPORT#{uploaded_key}"
+
+
+# One partition of per-cohort reviewer-score summaries, so the agreement figures are a keyed read
+# rather than a scan of every cohort.
+SUMMARIES_PK = "SUMMARIES"
+
+
+def summary_sk(scholarship: str, year: str) -> str:
+    return f"SUMMARY#{scholarship}#{year}"
 
 
 def to_dynamo(value: Any) -> Any:

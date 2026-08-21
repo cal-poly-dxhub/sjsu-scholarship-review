@@ -12,11 +12,12 @@ it approved, one home for the weights, and a detection zero no machine applies o
 own. A reviewer's scores are per-criterion like the model's, and a reviewer's total is
 derived the same way.
 
-Left open is the shape of the loop itself — how much gets signed off, and what routes
-an application to a person. Those are decisions, not details, and they change the state
-machine. See the questions at the end.
+Left open is how much gets signed off. What routes an application to a person is settled:
+the gap between the model's total and the reviewers'. See the questions at the end.
 
-Nothing here is built. Scoring stops at `scored` until this spec is finished.
+Nothing here is built, and sign-off in particular is not: scoring stops at `scored` until
+this spec is finished. The routing half is — reviewer scores arrive by upload and the
+queue is what the gap fills.
 
 ## ADDED Requirements
 
@@ -148,10 +149,14 @@ These decide the shape of the loop and have to be settled before the rest is wri
    an outcome — near an award boundary, low confidence, a detection zero, high variance.
    26-27 has over 8,000 applications in one scholarship, so "every application" puts a
    person back in front of every essay.
-2. **What routes an application to a person?** Variance between the AI and human scores
-   is the signal the current review queue uses, and it cannot fire at all until IT
-   delivers last year's human scores. The cant-tell confidence flag works today without
-   them.
+2. **What routes an application to a person?** Settled: how far the model's total is from
+   the reviewers', in points out of 100, and nothing else. An application is in the queue
+   while that gap reaches the line and leaves it when a corrected score makes the gap
+   smaller — being looked at does not take it out. The line is 10 points, chosen and not
+   measured: fitting it needs a cohort carrying both a model total and reviewer totals, and
+   the reviewer scores delivered so far are 26-27's, a different year from anything scored.
+   `reviewer-score-upload` built that queue. The cant-tell confidence flag is a second
+   signal that would work without reviewer scores at all, and is still open.
 3. **Does a sampled spot-check count as sign-off** for the applications it didn't cover,
    and if so, at what sample rate?
 4. **Who can approve?** One reviewer role, or a separate approver, and can a reviewer
@@ -161,7 +166,7 @@ These decide the shape of the loop and have to be settled before the rest is wri
 
 - The states an application moves through between `scored` and final, and which of them
   the dashboard is allowed to read.
-- The review queue itself: what fills it, how it is ordered, and how a reviewer gets the
-  next item.
+- The review queue itself: how a reviewer gets the next item. What fills it and how it is
+  ordered are settled — see question 2.
 - What a reviewer sees and submits per criterion.
 - The audit trail: what is kept, for how long, and who can read it.

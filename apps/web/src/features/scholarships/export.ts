@@ -51,7 +51,7 @@ export interface ScoreItem {
 const BATCH_KEYS = 100;
 
 export const EXPORT_WARNINGS = [
-  "No score here is signed off — reviewer sign-off is not built.",
+  "No score in this file has been signed off by a reviewer.",
   "Only totals made under the same rubric version are comparable with each other.",
   "Unscored and failed applications are in this file with their state, not as a zero.",
   "A row whose state is not 'scored' carries the previous score, not a current one: the answers"

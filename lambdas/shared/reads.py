@@ -19,13 +19,17 @@ from boto3.dynamodb.conditions import Key
 
 from .claims import FAILED, PROCESSING, SCORED, now
 from .table import (
+    GAP_INDEX_NAME,
+    GAP_PK,
     RANK_INDEX_NAME,
+    SUMMARIES_PK,
     TABLE_NAME,
     application_pk,
     application_sk,
     cohort_pk,
     from_dynamo,
     rank_pk,
+    reviewer_sk,
     score_sk,
     table,
 )
@@ -36,7 +40,16 @@ from .table import (
 COHORT_FIELDS = (
     "pk, sk, student_uuid, scholarship, #year, #status, academic_program, academic_level,"
     " major, gpa, category_scores, total_score, rubric_version, rank_pk, latest_scored_at,"
-    " claimed_until, attempt, failure, last_error, parsed_at"
+    " claimed_until, attempt, failure, last_error, parsed_at, reviewer_total, reviewer_count,"
+    " reviewers_stored, score_gap, reviewer_criteria"
+)
+
+# What the review queue's rows show. The gap index projects these, so asking for more would fetch
+# the base item and undo the point of a narrow projection.
+FLAGGED_FIELDS = (
+    "pk, sk, student_uuid, scholarship, #year, score_gap, total_score, reviewer_total,"
+    " reviewer_count, reviewers_stored, rubric_version, academic_program, academic_level, major,"
+    " gpa"
 )
 
 # The index projects these, so asking for more would fetch the base item and undo the point
@@ -125,6 +138,56 @@ def ranked(
     page = table().query(**request)
     items = [from_dynamo(item) for item in page.get("Items", [])]
     return items, encode_cursor(page.get("LastEvaluatedKey"))
+
+
+def flagged(
+    *, limit: int = PAGE, cursor: str | None = None
+) -> tuple[list[dict[str, Any]], str | None]:
+    """One page of the review queue, widest gap first, across every cohort.
+
+    One Query on one partition: only a flagged application carries `gap_pk`, so the index holds
+    the queue and the page needs no filter.
+    """
+    request: dict[str, Any] = {
+        "IndexName": GAP_INDEX_NAME,
+        "KeyConditionExpression": Key("gap_pk").eq(GAP_PK),
+        "ProjectionExpression": FLAGGED_FIELDS,
+        "ExpressionAttributeNames": {"#year": "year"},
+        # The index is in ascending gap order, so reading backwards is what "widest" means.
+        "ScanIndexForward": False,
+        "Limit": min(max(limit, 1), MAX_PAGE),
+    }
+    if cursor:
+        request["ExclusiveStartKey"] = decode_cursor(cursor)
+
+    page = table().query(**request)
+    items = [from_dynamo(item) for item in page.get("Items", [])]
+    return items, encode_cursor(page.get("LastEvaluatedKey"))
+
+
+def summaries() -> list[dict[str, Any]]:
+    """Every cohort's reviewer-score summary. One Query, so no cohort is scanned for a figure."""
+    found: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    while True:
+        request: dict[str, Any] = {"KeyConditionExpression": Key("pk").eq(SUMMARIES_PK)}
+        if start_key:
+            request["ExclusiveStartKey"] = start_key
+        page = table().query(**request)
+        found.extend(from_dynamo(item) for item in page.get("Items", []))
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            return found
+
+
+def reviewer_scores(scholarship: str, year: str, student_uuid: str) -> list[dict[str, Any]]:
+    """Every reviewer's stored scores for one application, so a screen can show them beside the
+    model's. One Query on the application's own partition."""
+    page = table().query(
+        KeyConditionExpression=Key("pk").eq(application_pk(scholarship, year, student_uuid))
+        & Key("sk").begins_with(reviewer_sk("")),
+    )
+    return [from_dynamo(item) for item in page.get("Items", [])]
 
 
 def application(

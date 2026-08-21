@@ -91,7 +91,7 @@ export function AsciiDots({
         );
         const opacity = Math.min(0.7, Math.max(0.25, 0.25 + norm * 0.45));
         ctx.fillStyle = `rgba(${textColor}, ${opacity})`;
-        ctx.fillText(CHARS[ci], x * cell + cell / 2, y * cell + cell / 2);
+        ctx.fillText(CHARS[ci] ?? "", x * cell + cell / 2, y * cell + cell / 2);
       }
     }
 
