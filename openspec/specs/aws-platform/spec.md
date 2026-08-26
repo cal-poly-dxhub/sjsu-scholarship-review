@@ -1,5 +1,6 @@
-## Purpose
+# aws-platform Specification
 
+## Purpose
 The deployed platform this system runs on: how the web app is served, who can sign
 in, how the API is reached, and where data lives. One capability, written in phases —
 phase 1 below, the rest as we reach them.
@@ -79,7 +80,7 @@ the batch job's own finish: a job runs for hours and a Lambda gets fifteen minut
 ```mermaid
 flowchart TB
     uploads[(S3 env bucket<br/>uploads/)]
-    ingest[ingest-worker]
+    ingest[ingest]
     table[(DynamoDB<br/>central table)]
     person([Reviewer, on the dashboard])
     pick{{How many to score?}}
@@ -121,14 +122,14 @@ flowchart TB
     table -->|progress, from item states| person
 ```
 
-Three Lambdas, one box each: `ingest-worker`, `score-ondemand`, and `score-batch`. The two
+Three Lambdas, one box each: `ingest`, `score-ondemand`, and `score-batch`. The two
 scoring workers are separate functions, not two branches of one, because they need different
 timeouts and different IAM — `score-batch` is the only thing in the system with the `batch/`
 prefix and the batch job permissions. They share the prompt builder and the reply check, so
 the same input gives the same score either way. `score-batch` has one box but two ways in:
 a person starts the submit, and the job's own event starts the collect.
 
-**Where the two diagrams touch, besides the table.** The workbook that lands in `uploads/` and
+**Where the two diagrams touch, besides the table.** The export that lands in `uploads/` and
 the button that starts a run both arrive through the front door in the first diagram, and the
 route for either one is inside `the remaining handlers`. Until that route exists the workers
 are triggered by hand — which is why neither diagram shows a queue or a schedule. The single
@@ -137,20 +138,34 @@ run on its own.
 
 ## Data model
 
-One DynamoDB table per environment, `<env>-scholarship`. Three kinds of item, told apart
-by the prefix in the partition key. One table means one name in one environment variable,
+One DynamoDB table per environment, `<env>-scholarship`. Five kinds of item, told apart
+by the prefix in the sort key. One table means one name in one environment variable,
 one IAM policy, and nothing that has to read across tables.
 
 | `pk` | `sk` | Item |
 | --- | --- | --- |
 | `COHORT#<scholarship>#<year>` | `APP#<student_uuid>` | one application |
+| `COHORT#<scholarship>#<year>` | `TOTAL#<rubric_version>#<model_id>#<student_uuid>` | one comparable total |
 | `APP#<scholarship>#<year>#<student_uuid>` | `SCORE#<timestamp>` | one scoring attempt |
 | `RUBRIC#<scholarship>` | `V#<version>` | one rubric version |
+| `COHORTS` | `<scholarship>#<year>` | one cohort exists, and what the export called it |
 
-Applications sit in their cohort's partition, so a cohort is one Query. Scores sit in a
-partition of their own per application, so the cohort read never drags reasoning text
-along with it. The sort key on a score is the time it was written, which keeps every
-attempt instead of overwriting.
+Applications and their totals sit in their cohort's partition, so a cohort is one Query and a
+set's totals are another on the same partition. Both narrow on the sort key's prefix: a cohort
+read is `begins_with("APP#")` and a set's totals are `begins_with("TOTAL#<version>#<model>#")`,
+so neither read drags the other's items along. Scores sit in a partition of their own per
+application, so the cohort read never drags reasoning text along with it. The sort key on a
+score is the time it was written, which keeps every attempt instead of overwriting.
+
+A total is one rubric version and one model, and both are in its sort key, so a run on a second
+model writes a row beside the first instead of over it. That pair is what a set is, and a run,
+a ranking, and a screen all work on one set at a time.
+
+The last is one constant partition holding a row per cohort. Every other read has to be
+told a scholarship and a year, and a scholarship's key is a slug taken from the export's own
+wording — "SJSU General Scholarships" is stored as `sjsu_general_scholarships` — so a guess
+comes back as an empty cohort rather than as a mistake. This partition is what a screen reads
+to offer the cohorts that are actually there.
 
 The key attributes are named `pk` and `sk` rather than for what they hold, because what
 they hold depends on the item. The prefix inside the value is what says which kind of item
@@ -160,7 +175,7 @@ it is, and it makes `begins_with` work on the sort key.
 
 | Attribute | Type | Written by | |
 | --- | --- | --- | --- |
-| `pk`, `sk` | String | ingest | `COHORT#sjsu_general#26-27`, `APP#3f9a…` |
+| `pk`, `sk` | String | ingest | `COHORT#sjsu_general#2026-2027`, `APP#3f9a…` |
 | `status` | String | both | `parsed` · `processing` · `scored` · `score_failed` |
 | `claimed_by` | String | worker | run holding the claim |
 | `claimed_until` | String | worker | when the claim expires |
@@ -168,23 +183,43 @@ it is, and it makes `begins_with` work on the sort key.
 | `qa_pairs` | List of Maps | ingest | the essays |
 | `academic_program`, `academic_level`, `major` | String | ingest | what a search matches on |
 | `gpa` | Number | ingest | a number, so it sorts |
-| `source` | Map | ingest | file, sheet, row |
+| `source` | Map | ingest | file, row |
 | `parsed_at` | String | ingest | |
 | `content_hash` | String | ingest | tells a changed application from an unchanged one |
 | `category_scores` | Map | worker | `{career_goals: {score, max}, …}` — numbers only |
 | `total_score` | Number | worker | `0`–`100` |
 | `rubric_version` | String | worker | which weights produced `total_score` |
-| `rank_pk` | String | worker | the ranking index's partition key — present only while a comparable total is |
+| `model_id` | String | worker | which model produced it — absent reads as no model, not as the default |
 | `latest_scored_at` | String | worker | points at the newest score item |
+
+The last five are the application's copy of its **newest** total, and nothing ranks off them.
+They are what a screen reads before it knows which set it is showing. No `rank_pk` sits here:
+an application is not a set, so the ranking key belongs to the total row.
 
 There is no applicant name field, and nothing adds one. The `Student` column is a UUID and
 the export carries no name, so an application is identified by its UUID throughout.
+
+**Totals**
+
+| Attribute | Type | Written by | |
+| --- | --- | --- | --- |
+| `pk`, `sk` | String | worker | `COHORT#sjsu_general#2026-2027`, `TOTAL#v1#us.anthropic.claude-sonnet-4-6#3f9a…` |
+| `student_uuid` | String | worker | which application this total is for |
+| `rubric_version`, `model_id` | String | worker | the set this row belongs to, repeated out of the key |
+| `total_score` | Number | worker | `0`–`100`, as the set's weights made it |
+| `category_scores` | Map | worker | the numbers behind it, so a ranked row needs no second read |
+| `rank_pk` | String | worker | the ranking index's partition key |
+| `scored_at` | String | worker | when this set scored it |
+| `recomputed_at` | String | recompute | present when a weight change moved this total, not a model call |
+
+One row per application per set. A run replaces only its own set's row, so a failure, a
+recompute, or a run on another model cannot reach a total another set wrote.
 
 **Scores**
 
 | Attribute | Type | |
 | --- | --- | --- |
-| `pk`, `sk` | String | `APP#sjsu_general#26-27#3f9a…`, `SCORE#2026-08-17T14:22:09Z` |
+| `pk`, `sk` | String | `APP#sjsu_general#2026-2027#3f9a…`, `SCORE#2026-08-17T14:22:09Z` |
 | `category_scores` | Map | same numbers, plus each criterion's reasoning and evidence |
 | `total_score` | Number | as computed at the time |
 | `reasoning_summary` | String | |
@@ -205,6 +240,22 @@ the export carries no name, so an application is identified by its UUID througho
 | `source_file`, `source_text` | String | the file the version was published from, as uploaded |
 | `published_at`, `published_by` | String | when, and whose account did it |
 
+**Cohorts**
+
+| Attribute | Type | Written by | |
+| --- | --- | --- | --- |
+| `pk`, `sk` | String | ingest | `COHORTS`, `sjsu_general_scholarships#2026-2027` |
+| `scholarship`, `year` | String | ingest | the two halves of the key, so a screen does not split the sort key |
+| `display_name` | String | ingest | the export's own wording, e.g. `SJSU General Scholarships` |
+| `last_ingest_at` | String | ingest | when an export last wrote to this cohort |
+
+**A year has one written form: two consecutive four-digit years, as in `2026-2027`.** The year
+is half of a cohort's key, so `2026`, `26-27`, and `2026-2027` are three partitions and two of
+them are always empty — and nothing about reading an empty cohort says a year was typed wrong.
+Every route that names a cohort therefore checks the form and refuses anything else, rather than
+keying on it. The office writes the short form in a file name, so ingest expands `25-26` to
+`2025-2026` on the way in; that is the one place a short year is accepted.
+
 A criterion's `id` is its name slugged, so nothing outside the rubric gets to name a criterion.
 `guidance` is the prose inside a criterion's block — an essay prompt, or where its evidence may
 come from — and `preamble` is the text before the first criterion. Both are assembled into the
@@ -222,11 +273,12 @@ a run id on the on-demand path, the Bedrock batch job's name on the batch path �
 what a submitted job is waiting on is a read of any claimed item. Nothing about a run is
 stored that the applications do not already say.
 
-`category_scores` and `total_score` appear on both the application and the score item. The
-score item is the immutable record, so it has to be readable on its own for history to
-mean anything; the application's copy is what a cohort read uses, so a ranking never has
-to open 4,887 score items. Both are written together, and neither is the place a weight
-change is applied first — see the total requirement in phase 3.
+`category_scores` and `total_score` appear on the total row, on the application, and on the
+score item. The score item is the immutable record, so it has to be readable on its own for
+history to mean anything; the total row is what a ranking reads, so it never has to open 4,887
+score items; the application's copy is the newest total, so a cohort read says something before
+a set is picked. All three are written together, and none of them is the place a weight change
+is applied first — see the total requirement in phase 3.
 
 `status` and `year` are DynamoDB reserved words. Every expression touching them needs
 `ExpressionAttributeNames`.
@@ -235,37 +287,41 @@ change is applied first — see the total requirement in phase 3.
 
 | Index | `pk` | `sk` | Projection |
 | --- | --- | --- | --- |
-| `rank-by-total` | `rank_pk` — `RANK#<scholarship>#<year>#<rubric_version>` | `total_score` | the fields the ranked list shows |
+| `rank-by-total` | `rank_pk` — `RANK#<scholarship>#<year>#<rubric_version>#<model_id>` | `total_score` | the fields the ranked list shows |
 
 DynamoDB returns a Query in sort-key order, so a ranked page is one Query on this index and
 nothing sorts a cohort — not the browser, not the handler. Reversing the read direction is
 what "highest" and "lowest" are.
 
-The rubric version in that key is the one on the application — the version whose weights made
-that total. It is inside the partition key on purpose: totals made from different weights land
-in different partitions, so a ranked read cannot mix them and no filtering after the read is
-needed to keep them apart. Publishing a version writes nothing to any application, so no item
-moves partitions and last year's ranked list is still where it was. A worker writes `rank_pk`
-when it stores a total and removes it when scoring fails, so the index holds only scored,
-comparable applications.
+The rubric version and the model in that key are the set the total belongs to — the weights
+that made it and the reader that applied them. Both are inside the partition key on purpose:
+totals made from different weights, or by different models, land in different partitions, so a
+ranked read cannot mix them and no filtering after the read is needed to keep them apart.
+Publishing a version writes nothing to any application, so no item moves partitions and last
+year's ranked list is still where it was. A worker writes `rank_pk` on the total row when it
+stores a total, so the index holds only scored, comparable applications.
 
-Which version a cohort is ranked under is read off the applications themselves — they carry
-it, so nothing else has to record it. A cohort that holds two versions at once, part-way
-through a rescore, is the one case where that is a choice rather than a fact, and the screen
-names both rather than picking one silently. Unscored and
-failed ones have no `rank_pk` and are absent from it — they are counted from the cohort Query
-instead, which is the read the dashboard's progress counts already make.
+Which set a cohort is ranked under is asked for, not inferred: a ranked read names a version and
+a model, and refuses to guess either. A cohort that holds more than one set — part-way through a
+rescore, or after a run on a second model — is named as such on screen, with the count in each,
+rather than one being picked silently. An application with no total in the set being shown has no
+row in that partition and is absent from it, as are the unscored and the failed — they are counted
+from the cohort Query instead, which is the read the dashboard's progress counts already make.
+
+A failure clears the application's copy and leaves every total row alone. Sets are separate rows,
+so a failed run on one model cannot remove a number another model's run wrote.
 
 The projection carries the fields the list shows and nothing else, so `qa_pairs` never reaches
 the index any more than it reaches a cohort read.
 
 `pk` and `sk` cannot be changed after the table exists, which is why they are pinned here. An
 index can be added later; this is the only one, and nothing else about the table is pinned.
+## The human in the loop
 
-## ADDED Requirements
+Its own capability, part-written: `openspec/specs/human-in-the-loop/spec.md`. Sign-off, the
+review queue, and the AI-detection gate live there, not in this spec.
 
-**Phase 1 — front door.**
-
+## Requirements
 ### Requirement: Web app served over HTTPS from a private origin
 
 The built web app SHALL be served over HTTPS from a CDN in front of a private
@@ -308,6 +364,12 @@ status `200`, not a storage error.
 After a deploy, the next page load SHALL serve the newly built app. Fingerprinted
 assets SHALL be cacheable long-term; the app shell SHALL NOT be.
 
+A deploy SHALL publish the web build itself, so the site is not a step someone has to remember
+after the stacks are up. What it SHALL NOT do is build the app: the bundle carries the user
+pool's ids, which the same deploy produces, so a brand-new environment is deploy, build, deploy.
+A deploy with no build on disk SHALL leave the site as it is and SHALL say so, rather than
+publishing an empty bucket over a working site.
+
 #### Scenario: Load right after a deploy
 
 - **WHEN** a reviewer loads the site after a deploy finishes
@@ -318,6 +380,17 @@ assets SHALL be cacheable long-term; the app shell SHALL NOT be.
 - **WHEN** a fingerprinted asset is served
 - **THEN** its cache lifetime is long, and a new build changes its filename rather
   than its contents
+
+#### Scenario: A deploy with a build on disk
+
+- **WHEN** the stacks are deployed and the web app has been built
+- **THEN** the build is published, the files the last build left behind are removed, and the
+  distribution's cached copies are invalidated
+
+#### Scenario: A deploy with no build on disk
+
+- **WHEN** the stacks are deployed from a checkout that has never built the web app
+- **THEN** the site is left as it was, and the deploy says which command to run to publish it
 
 ### Requirement: Sign-in is required and accounts are created by an admin
 
@@ -348,26 +421,26 @@ refused. An admin SHALL create accounts.
 
 ### Requirement: Sign-in produces short-lived tokens
 
-A successful sign-in SHALL return an identity token and an access token the web app
-can send to the API. Access tokens SHALL expire within one hour. A refresh token
+A successful sign-in SHALL return an identity token, which is the token the web app sends to
+the API, and an access token. Both SHALL expire within one hour. A refresh token
 SHALL last no longer than 30 days.
 
 #### Scenario: Successful sign-in
 
 - **WHEN** a reviewer signs in with valid credentials
-- **THEN** they receive an identity token carrying their email and subject, and an
-  access token scoped to this environment's app client
+- **THEN** they receive an identity token carrying their email and subject, scoped to this
+  environment's app client, and an access token alongside it
 
-#### Scenario: Access token expiry
+#### Scenario: Token expiry
 
-- **WHEN** an access token is more than one hour old
+- **WHEN** a token is more than one hour old
 - **THEN** it is no longer accepted by the API
 
 #### Scenario: Sign-out
 
 - **WHEN** a reviewer signs out
 - **THEN** their session is ended and their refresh token can no longer mint new
-  access tokens
+  tokens
 
 ### Requirement: The web app and the API share one domain
 
@@ -473,7 +546,7 @@ read no data store.
 
 Because the app and the API share one origin, the API SHALL NOT grant cross-origin access to
 anyone. The environment bucket SHALL grant exactly one: `PUT` from the app's own origins, so
-the browser's presigned upload of a workbook is answered. No other method and no other origin
+the browser's presigned upload of an export is answered. No other method and no other origin
 SHALL be allowed, and no read SHALL be.
 
 #### Scenario: Call from the web app
@@ -486,7 +559,7 @@ SHALL be allowed, and no read SHALL be.
 - **WHEN** a browser on any other origin calls the API
 - **THEN** no origin is granted access, and the browser blocks the response
 
-#### Scenario: A workbook is uploaded from the browser
+#### Scenario: An export is uploaded from the browser
 
 - **WHEN** the browser preflights its presigned `PUT` to the bucket
 - **THEN** the bucket answers it, because the app's own origin and that one method are allowed,
@@ -512,7 +585,7 @@ whether the token check passed.
 ### Requirement: Each environment owns its own data stores
 
 An environment SHALL have one table holding applications, scores, and rubrics, and one
-bucket holding uploaded workbooks and batch files under separate prefixes, both
+bucket holding uploaded exports and batch files under separate prefixes, both
 named so they cannot collide with another environment's. Creating an environment SHALL NOT
 read from or write to any store outside it.
 
@@ -680,8 +753,9 @@ no longer possible.
 
 #### Scenario: Token about to expire
 
-- **WHEN** the access token is close to its expiry and a refresh token is still valid
-- **THEN** the app gets a new access token without interrupting the reviewer
+- **WHEN** the ID token is close to its expiry and a refresh token is still valid
+- **THEN** the app gets a new one without interrupting the reviewer, and several calls made
+  while it is expiring share the one refresh
 
 #### Scenario: Refresh no longer possible
 
@@ -799,13 +873,15 @@ rather than submitting a job that cannot run.
 - **THEN** that path is used, and the trade it makes — cost against waiting — is stated
   before the run starts
 
-### Requirement: A run is for one cohort and one rubric version, and only that decides what it takes
+### Requirement: A run is for one cohort, one rubric version, and one model, and only that decides what it takes
 
-A run SHALL be started for a scholarship, a year, and the rubric version it scores against.
-What it may take SHALL be decided by comparing that version with the version already stored on
-each application. A run MAY be given one narrowing scope — never scored, failed, or scored under
-a different version — which SHALL only cut that set down, never widen it, so that a trigger takes
-the work its label names and no more. Nothing else SHALL decide what a run may take. Publishing a
+A run SHALL be started for a scholarship, a year, the rubric version it scores against, and the
+model it scores with. That version and that model together are the run's set. What it may take
+SHALL be decided by whether a total already exists for that set: an application with no total in
+the set is work, and an application with one is not. A run MAY be given one narrowing scope —
+never scored, failed, scored under a different version, or scored at this version by a different
+model — which SHALL only cut that set down, never widen it, so that a trigger takes the work its
+label names and no more. Nothing else SHALL decide what a run may take. Publishing a
 rubric version SHALL NOT make any application claimable, because publishing writes to no
 application and starts no run.
 
@@ -817,17 +893,31 @@ application and starts no run.
   out of its ranking, and no trigger count moves, because each application still carries the
   version it was scored under and no run has been asked for
 
-#### Scenario: A run for a version an application already has
+#### Scenario: A run for a set an application already has
 
-- **WHEN** a run for `v1` reaches an application whose stored `rubric_version` is `v1`
+- **WHEN** a run for `v1` on one model reaches an application that already has a total for that
+  version and that model
 - **THEN** it is not claimed and no model call is made for it — the run has nothing to do
   there
 
 #### Scenario: A run for a version an application does not have
 
-- **WHEN** a run for `v2` reaches an application whose stored `rubric_version` is `v1`
-- **THEN** it is claimable, and scoring it overwrites that application's scores, total, and
-  version, because a rescore is what asking for a different version means
+- **WHEN** a run for `v2` reaches an application whose newest total is at `v1`
+- **THEN** it is claimable, and scoring it writes a `v2` total and moves the application's copy
+  to it, because a rescore is what asking for a different version means
+
+#### Scenario: A run on a model the application has not been scored by
+
+- **WHEN** a run for `v1` on a second model reaches an application already scored at `v1` by the
+  first
+- **THEN** it is claimable, and when it finishes both totals exist side by side, each naming the
+  model that made it, and neither run's numbers were changed by the other
+
+#### Scenario: A run that finds nothing
+
+- **WHEN** every application in the cohort already has a total for the run's version and model
+- **THEN** the run says which version and which model it found nothing for, rather than reporting
+  an empty cohort
 
 #### Scenario: A run cannot reach outside its cohort
 
@@ -838,8 +928,8 @@ application and starts no run.
 ### Requirement: A worker takes only work that is not already being processed
 
 Every application item SHALL carry a processing state. A worker SHALL take items whose
-state is not `processing`, and SHALL skip items already scored under the rubric version the
-run is for. An item SHALL NOT become claimable because a rubric version was published, or
+state is not `processing`, and SHALL skip items that already have a total for the run's set.
+An item SHALL NOT become claimable because a rubric version was published, or
 because it belongs to a different cohort or year. Finding that work SHALL NOT require
 reading the whole table.
 
@@ -855,7 +945,7 @@ reading the whole table.
 
 #### Scenario: Item already scored
 
-- **WHEN** an item already has a score from the rubric version the run is for
+- **WHEN** an item already has a total for the rubric version and the model the run is for
 - **THEN** no worker takes it, and no second model call is made for it
 
 #### Scenario: Last year's cohort after a rubric change
@@ -872,15 +962,61 @@ reading the whole table.
 - **THEN** it reads one cohort's items, addressed by scholarship and year, not every item
   in the table
 
-### Requirement: Ingesting a workbook again does not destroy what scoring wrote
+### Requirement: An export is read as a workbook or a CSV
+
+Ingest SHALL read an application export saved as an `.xlsx` workbook or as a `.csv` file, and
+SHALL produce the same applications from either. Both SHALL be read by the same column map and
+the same header-row check, and the academic year SHALL come from the file name either way. A
+file under the uploads prefix with any other suffix SHALL be left alone rather than failed.
+
+A CSV SHALL NOT be required to be UTF-8. Ingest SHALL read the encodings the office's export
+tool actually produces, and SHALL NOT fail a whole file over a single character it could
+decode. A field SHALL be allowed to run across lines.
+
+#### Scenario: The export is a workbook
+
+- **WHEN** an `.xlsx` export is ingested
+- **THEN** its rows become applications in the cohort the file name's year names
+
+#### Scenario: The export is a CSV
+
+- **WHEN** a `.csv` export naming the same columns is ingested
+- **THEN** the same applications are written under the same keys, and the duplicate and
+  re-ingest rules apply to it unchanged
+
+#### Scenario: A CSV that is not UTF-8
+
+- **WHEN** an essay in a CSV contains a curly apostrophe written in a Windows code page rather
+  than UTF-8
+- **THEN** the file is read and the character is kept, rather than the whole export failing on
+  one byte
+
+#### Scenario: A CSV saved out of a spreadsheet program
+
+- **WHEN** a CSV carries a byte-order mark ahead of its first column name
+- **THEN** the header row is still read, so the file is not refused for naming none of the
+  export's columns
+
+#### Scenario: An essay runs across several lines
+
+- **WHEN** a quoted field in a CSV contains line breaks
+- **THEN** it is read as one field of one application, and the line breaks are kept in the
+  essay text
+
+#### Scenario: Some other file lands under the uploads prefix
+
+- **WHEN** a file that is neither an `.xlsx` nor a `.csv` lands under the uploads prefix
+- **THEN** nothing is ingested and nothing is reported as a failure
+
+### Requirement: Ingesting an export again does not destroy what scoring wrote
 
 Ingest SHALL update the application fields it owns and leave every other field alone. It
 SHALL NOT reset an application's scoring state unless the application's own content
 changed.
 
-#### Scenario: Workbook uploaded twice
+#### Scenario: Export uploaded twice
 
-- **WHEN** a workbook is ingested again and an application in it is already scored
+- **WHEN** an export is ingested again and an application in it is already scored
 - **THEN** its score, scoring state, and any review state are still there afterwards
 
 #### Scenario: An application's content changed
@@ -911,9 +1047,9 @@ without being reported.
 - **WHEN** the same student applies to two scholarships
 - **THEN** the two applications are stored as two items
 
-#### Scenario: Duplicate row in one workbook
+#### Scenario: Duplicate row in one export
 
-- **WHEN** a workbook contains two rows that resolve to the same application
+- **WHEN** an export contains two rows that resolve to the same application
 - **THEN** the ingest reports the duplicate rather than silently keeping one
 
 ### Requirement: An item is claimed before it is scored
@@ -1120,6 +1256,21 @@ that match, and every score within its own criterion's maximum. Anything else SH
 failure. There SHALL be no partial parse, no salvage of whatever criteria could be found,
 and no repair step that turns an unreadable reply into a score.
 
+One wrapper SHALL be taken off before the reply is read: a markdown code fence around the whole
+reply and nothing else. Models write one whatever the prompt says, and every score in a run
+fails on it. This is not a repair — the object inside is read exactly as it was written, and a
+reply with anything outside the fence is still a failure.
+
+#### Scenario: The whole reply is inside a code fence
+
+- **WHEN** a reply is a JSON object wrapped in a markdown code fence and nothing else
+- **THEN** the fence is taken off and the object is checked as it stands
+
+#### Scenario: The reply carries prose as well
+
+- **WHEN** a reply has text before or after the object
+- **THEN** the item fails, because pulling an object out of prose is a salvage, not a wrapper
+
 #### Scenario: The reply is cut off
 
 - **WHEN** a model reply is truncated part-way through the criteria
@@ -1212,14 +1363,15 @@ kept as provenance and never sent to a model.
 
 A worker SHALL store per-criterion scores and a total worked out from them and the
 rubric's weights. Every stored total SHALL record which rubric version's weights produced
-it. A total SHALL NOT be taken from the model, and SHALL NOT be the only record of a
-score.
+it and which model produced the scores under it. A total SHALL NOT be taken from the model, and
+SHALL NOT be the only record of a score.
 
 #### Scenario: A weight changes
 
 - **WHEN** a criterion's weight is changed and the criteria themselves are unchanged
 - **THEN** the totals are worked out again from the per-criterion scores already stored,
-  no model is called, and the per-criterion scores are not touched
+  no model is called, the per-criterion scores are not touched, and each total moves to the new
+  version under the model that made it — a recompute never changes which model made a number
 
 #### Scenario: The criteria change, not just the weights
 
@@ -1239,8 +1391,10 @@ score.
 
 - **WHEN** a total is stored, recomputed under a new rubric version, or invalidated by a
   failure
-- **THEN** the application's ranking-index key is written, moved to the new version's
-  partition, or removed with it, so what the index holds is exactly what is comparable
+- **THEN** the set's total row is written with its ranking-index key, moved to the new version's
+  row under the same model, or — on a failure — left alone while the application's own copy is
+  cleared, so what the index holds is exactly what is comparable and no set's numbers are
+  removed by another set's run
 
 #### Scenario: A total is recomputed part-way
 
@@ -1288,117 +1442,6 @@ working on it.
 - **WHEN** a run finishes
 - **THEN** it logs how many items it claimed, scored, failed, and skipped, with the
   token totals for the run
-
-## Phase 2 — API runtime
-
-_Next up. Run the API on AWS behind the phase-1 edge, and settle its route contract._
-
-TBD, with two exceptions. Listing a scholarship's rubric versions and publishing one are
-settled here, because nothing can be scored until a version exists and publishing is the only
-way one gets there. Both are specified with the dashboard below, since that is where a person
-uses them. The rest of the route contract is still open.
-
-**Phase 4 — the screens.** The last phase, and the one that makes the work visible. With
-no reviewer loop built, these screens are the whole output. The work splits across the two
-the web app already has, and one that stays shut:
-
-| Screen | Its job |
-| --- | --- |
-| Dashboard | A trigger section, and for now that is the whole screen: upload a workbook, publish and pick a rubric, every trigger, and progress. The reliability analysis already there is kept in the code, below it, untouched |
-| Scholarships | Find an application, rank a cohort, read the per-criterion scores, export |
-| Reviews | Nothing yet. Sign-off is not built, so it is not offered |
-
-**The dashboard is where work gets in and where it starts.** For this phase the dashboard is a
-trigger section — the two uploads, the version picker, the triggers, and the progress counts,
-and nothing else is built on it. The reliability analysis already on the screen is kept as it
-stands, below the trigger section; it is not rebuilt, and it is not deleted.
-
-The first is the workbook upload. A person picks a workbook on the dashboard and it goes to the
-uploads prefix in the environment's bucket, where ingest picks it up. That is the only way an
-export gets into the system, and it is the only thing an upload triggers — the file landing
-does not start scoring.
-
-The second is the rubric. A rubric arrives the same way an export does: someone uploads its
-text, weights are typed beside the criteria the parse found, and it is written as a version.
-Nothing is seeded and no file in the repo is special — `rubric.md` is the file you would upload
-first for the SJSU General five. A published version is never edited, because every stored total
-names the version whose weights made it, and the trigger section picks which published version a
-run is for. Publishing on its own moves no cohort.
-
-The third is the triggers. Scoring the unscored, recomputing a total after a weight change,
-rescoring what changed, and retrying what failed all start from a button here rather than
-from a schedule or the upload. That keeps a model bill from being run up by a file landing in
-a bucket, and it means the person who asked for the work is the person watching it. The
-dashboard needs no extra data to report progress: a cohort Query returns each application's
-state, so done, running, and left are counts over items it already reads.
-
-**What is already on the dashboard stays as it is.** Its reliability sections —
-human-versus-human against AI-versus-human agreement, the reviewer distribution, and the
-per-criterion and per-scholarship breakdowns — belong to a different feature that is waiting on
-last year's reader scores. They are kept, not deleted and not rebuilt: this phase's work on the
-dashboard is the trigger section. What they cannot do is hold the new work up, so they show as
-waiting on data while the upload, the triggers, and the progress counts work without them.
-Nothing added here is allowed to depend on a human score.
-
-The two halves are also scoped differently, which is why they cannot share one fetch or one
-cohort picker: the trigger section is about one scholarship and one year, while a
-per-scholarship breakdown is about all of them.
-
-**The scholarships screen is where results are read.** The ranked list is one Query on the
-ranking index, which returns applications already in score order — the store does the
-ordering, and no score record has to be opened to get it. Opening one application is where
-the per-criterion reasoning and evidence get read. The counts beside the list — unscored,
-failed, scored under an older rubric version — come from the cohort Query, because those
-applications are deliberately not in the index.
-
-That screen already has a search: a filter panel over a fetched cohort, in
-`apps/web/src/features/scholarships/applications-list.tsx`. The advanced search is that code
-carried forward and extended, not a second search built beside it. What changes underneath is
-the data it reads — the cohort id and the score fields both move with the new model — and the
-markup, which is rebuilt on the app's own components.
-
-That screen can also hand the results over as JSON, built from what it already fetched, so
-the export writes nothing to S3 — a cohort of 5,000 applications at the fields below is around
-a megabyte. What it must not be is a dump of the raw items: the
-claim fields, attempt counts, content hashes, and internal keys mean nothing outside the
-pipeline, and DynamoDB's type wrappers make the file harder to read for no gain.
-
-**Reasoning text is a checkbox, and it is the one thing that changes what an export costs.**
-Per-criterion scores sit on the application item, so an export without reasoning is a
-client-side build off the one Query the screen already made. Reasoning and evidence sit on the
-score items, so an export with it has to read the newest score item for every application in
-the file — 4,887 of them for a full cohort. The box therefore defaults to off, and checking it
-says what it is about to do first.
-
-That read is a `BatchGetItem` on exact keys, not a scan: the application carries
-`latest_scored_at`, which is the sort key of its newest score item, so the keys are known
-before the call. A hundred per request, about fifty requests for a full cohort. Slow enough to
-show progress, cheap enough not to need a job.
-
-Exporting one open application always carries its reasoning, box or not — the detail screen
-read that score item to render the page.
-
-Three things this phase has to be careful about, because each quietly produces a wrong
-answer:
-
-- A cohort part-way through scoring. Ranking 4,887 applications when 3,000 have no score
-  yet gives a leaderboard made mostly of nothing. Unscored and failed applications are
-  kept out of the ranking and counted separately.
-- Totals from two different rubric versions in one list. A stored total is only comparable
-  with another total made from the same weights. The rubric version sits inside the ranking
-  index's partition key, so a read for the cohort's current version cannot return a total made
-  from older weights; those applications are counted from the cohort Query instead.
-- Sign-off. Nobody has signed anything off, because `human-in-the-loop` is not built.
-  The screen has to say so, or the top of a sorted list reads as a decision.
-
-**There is no name to search, and no name column is added.** The export is anonymized: the
-`Student` column holds a UUID, which is the applicant's identifier here. Search matches that
-UUID and the stored fields beside it — program, level, major, GPA.
-
-**Search does not reach inside the essay text.** It matches the applicant identifier and the
-stored fields beside it, and nothing else. Searching essays would mean either reading every
-cohort's essay text on every query — which is the read cost the `ProjectionExpression`
-exists to avoid — or standing up a search service, which nothing here is scoped for.
 
 ### Requirement: A person can search a cohort
 
@@ -1455,9 +1498,10 @@ everything.
 ### Requirement: Results can be ranked highest or lowest
 
 A person SHALL be able to order a cohort by score, highest first or lowest first. The order
-SHALL come from the ranking index, read in the direction the person asked for. Only totals
-made from the same rubric version SHALL be ordered against each other. Nothing SHALL sort a
-cohort in a handler or in the browser.
+SHALL come from the ranking index, read in the direction the person asked for. Only totals made
+from the same rubric version by the same model SHALL be ordered against each other, and a ranked
+read SHALL be told both rather than defaulting either — the one it picked would decide the order.
+Nothing SHALL sort a cohort in a handler or in the browser.
 
 #### Scenario: Ranked highest first
 
@@ -1477,12 +1521,13 @@ cohort in a handler or in the browser.
 - **THEN** they are left out of the ranking and reported as a count, not placed at the
   bottom as zero
 
-#### Scenario: A cohort holding two rubric versions
+#### Scenario: A cohort holding two sets
 
-- **WHEN** a cohort's applications carry more than one `rubric_version`, part-way through a
-  rescore
-- **THEN** the screen names both versions and ranks one of them, reporting the other as a
-  count, rather than ordering totals made from different weights against each other
+- **WHEN** a cohort holds totals from more than one rubric version or more than one model —
+  part-way through a rescore, or after a run on a second model
+- **THEN** the screen names the set it is ranking and every other set present with its count,
+  rather than ordering totals made from different weights, or by different readers, against
+  each other
 
 #### Scenario: A weight changes
 
@@ -1490,10 +1535,66 @@ cohort in a handler or in the browser.
 - **THEN** the next ranking reflects the new weight, and no per-criterion score was
   rewritten to get there
 
+### Requirement: An academic year has one written form
+
+An academic year SHALL be written as two consecutive four-digit years, as in `2026-2027`. A
+call that names a cohort SHALL check the year against that form and SHALL refuse anything else
+with the form it takes, rather than building a key out of it. Ingest SHALL accept the short form
+in a file name and expand it, because that is what the office's export is called; nothing else
+SHALL accept a short year.
+
+#### Scenario: A year in the one form
+
+- **WHEN** a cohort is addressed as `2026-2027`
+- **THEN** it is read
+
+#### Scenario: A year in some other form
+
+- **WHEN** a cohort is addressed as `2026`, `26-27`, or `2026-2028`
+- **THEN** the call is refused and says the form it takes, rather than reading an empty cohort
+  that looks like a cohort with nothing in it
+
+#### Scenario: The short year in a file name
+
+- **WHEN** an export named `SJSU General Scholarship 25-26.csv` is ingested
+- **THEN** its rows are written to the `2025-2026` cohort
+
+#### Scenario: No year in the file name
+
+- **WHEN** an export's name carries no year
+- **THEN** it is refused with the file named, because there is no cohort to write to
+
+### Requirement: The cohorts that exist can be read without guessing a key
+
+There SHALL be one read that names no cohort and returns every cohort that has been ingested,
+with the wording the export used for each. A screen SHALL offer that list rather than asking
+someone to type a scholarship key. Ingest SHALL be what adds a cohort to it.
+
+A scholarship's key is a slug of the export's own wording, so a typed guess is not distinguishable
+from an empty cohort — which is the reason this read exists.
+
+#### Scenario: A person chooses what to work on
+
+- **WHEN** a screen needs a scholarship and a year
+- **THEN** it lists the cohorts that have been ingested, showing each one's export wording, and
+  a choice from that list is what every other read is addressed with
+
+#### Scenario: A cohort is ingested for the first time
+
+- **WHEN** an export writes applications into a scholarship and year that had none
+- **THEN** that cohort appears in the list, with the name the export used
+
+#### Scenario: Nothing has been ingested
+
+- **WHEN** the list is empty
+- **THEN** the screen says nothing has been ingested and that an export goes up first, rather
+  than showing an empty picker
+
 ### Requirement: Reading a cohort does not read the whole table
 
 Fetching, searching, or ranking a cohort SHALL address it by scholarship and year rather than
-reading every item in the table.
+reading every item in the table. The one read that names no cohort SHALL be the cohort list, and
+it SHALL be a Query on a single partition rather than a scan.
 
 #### Scenario: One cohort is opened
 
@@ -1505,6 +1606,11 @@ reading every item in the table.
 - **WHEN** a ranked page is read from the ranking index
 - **THEN** it is addressed by scholarship, year, and rubric version, so no other cohort's
   items are read and nothing is scanned
+
+#### Scenario: The cohort list is read
+
+- **WHEN** the cohorts that exist are listed
+- **THEN** one partition is read, and no application, score, or rubric item is
 
 ### Requirement: The screens say the scores are unreviewed
 
@@ -1522,25 +1628,31 @@ the cohort it covers.
 - **THEN** it says how many of the cohort are ranked, unscored, failed, and scored under
   an older rubric version
 
-### Requirement: The workbook is uploaded from the dashboard
+### Requirement: The export is uploaded from the dashboard
 
-The dashboard SHALL be where a person uploads an application export. The file SHALL go to
-the uploads prefix in the environment's bucket, where ingest reads it. An upload SHALL NOT
-start scoring.
+The dashboard SHALL be where a person uploads an application export. The picker SHALL accept
+an `.xlsx` or a `.csv`, and SHALL refuse any other suffix on the screen rather than handing out
+an upload URL for a file nothing will read. The file SHALL go to the uploads prefix in the
+environment's bucket, where ingest reads it. An upload SHALL NOT start scoring.
 
 #### Scenario: A person uploads an export
 
-- **WHEN** a person picks a workbook on the dashboard
+- **WHEN** a person picks an export on the dashboard
 - **THEN** it is stored under the uploads prefix, ingest writes its applications into the
   cohort, and the screen says how many rows came in
 
+#### Scenario: A person picks a file of some other kind
+
+- **WHEN** a person picks a file that is neither an `.xlsx` nor a `.csv`
+- **THEN** the screen says which two kinds it takes, and nothing is uploaded
+
 #### Scenario: An upload lands
 
-- **WHEN** a workbook finishes uploading
+- **WHEN** an export finishes uploading
 - **THEN** nothing is scored, and the cohort's applications sit unscored until someone
   presses the scoring button
 
-#### Scenario: The same workbook is uploaded twice
+#### Scenario: The same export is uploaded twice
 
 - **WHEN** an export is uploaded again for a cohort that has already been scored
 - **THEN** the scores already stored survive it, as the ingest requirement in phase 3
@@ -1604,7 +1716,7 @@ write to no application.
 
 - **WHEN** a person wants to publish for a scholarship that has no applications
 - **THEN** it is not offered — the scholarships available to publish for are the ones with a
-  cohort, so its workbook is uploaded first
+  cohort, so its export is uploaded first
 
 ### Requirement: A run is scored under a rubric version a person picked
 
@@ -1689,20 +1801,31 @@ any of them.
 The reliability analysis already on the dashboard — human-versus-human against
 AI-versus-human agreement, the reviewer distribution, and the per-criterion and
 per-scholarship breakdowns — SHALL stay. It SHALL NOT be removed to make room for the
-trigger section, and SHALL NOT be rebuilt in this phase. Where it has no data, it SHALL say
-it is waiting on data.
+trigger section. Where it has no data, it SHALL say it is waiting on data, and SHALL say why
+rather than only that a figure is empty.
+
+What it reads is not settled by this change. Comparing a model score against a reader's score
+needs reviewer scores stored and a read that returns the comparison, and neither is in this
+change's scope — they belong to the reviewer-score work. Until that lands, this half of the
+dashboard has no route to call, and it SHALL say so on screen instead of showing a figure it
+could not fetch.
 
 #### Scenario: The trigger section is added
 
 - **WHEN** the upload and the triggers are added to the dashboard
-- **THEN** the reliability sections are still there, left as they are, below the trigger
-  section
+- **THEN** the reliability sections are still there, below the trigger section
 
 #### Scenario: Last year's reader scores are still missing
 
 - **WHEN** a reliability section has no human scores to compare against
-- **THEN** it says it is waiting on data, and shows no number, no percentage, and no
-  empty chart that could be read as a result
+- **THEN** it says it is waiting on data and which data, and shows no number, no percentage,
+  and no empty chart that could be read as a result
+
+#### Scenario: The read it needs is not built
+
+- **WHEN** the comparison read does not exist in the deployed environment
+- **THEN** the section says the comparison is not built, rather than reporting a failed fetch
+  as an absence of disagreement
 
 #### Scenario: A reliability section fails to load
 
@@ -1713,7 +1836,7 @@ it is waiting on data.
 ### Requirement: Scoring is started by hand
 
 Scoring SHALL start only when a person asks for it, for a chosen cohort. Nothing SHALL
-score on a schedule or because a workbook was uploaded. The dashboard SHALL say how many
+score on a schedule or because an export was uploaded. The dashboard SHALL say how many
 applications the run would cover and which path it will take before it starts.
 
 #### Scenario: A person starts scoring
@@ -1724,7 +1847,7 @@ applications the run would cover and which path it will take before it starts.
 
 #### Scenario: Nothing is scored without being asked
 
-- **WHEN** a workbook is ingested
+- **WHEN** an export is ingested
 - **THEN** its applications sit unscored until someone starts a run
 
 #### Scenario: Already scored applications are skipped
@@ -1886,7 +2009,3 @@ per application to get it.
 - **THEN** that file carries its per-criterion reasoning and evidence in full whatever the box
   says, because the screen has already read its score item to show the detail
 
-## The human in the loop
-
-Its own capability, part-written: `specs/human-in-the-loop/spec.md`. Sign-off, the
-review queue, and the AI-detection gate live there, not in this spec.

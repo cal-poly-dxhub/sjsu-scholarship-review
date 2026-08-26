@@ -204,7 +204,8 @@ below are triggered directly until those routes exist.
 
 ## 6. Phase 4 — the screens
 
-- [x] 6.1 Two reads, and nothing else touches the table from a screen: a cohort read — one
+- [x] 6.1 Two cohort-scoped reads, and nothing else touches the table from a screen — the
+  cohort list in 9.1 is the third and the only one that names no cohort: a cohort read — one
   Query on the cohort partition with a `ProjectionExpression` that leaves out `qa_pairs`, and
   `ExpressionAttributeNames` for `status` and `year`, serving search, states, and counts — and a
   ranked read, one Query on the ranking index. Every feature below uses one of the two.
@@ -231,13 +232,15 @@ below are triggered directly until those routes exist.
   cohort a ranking covers.
 - [x] 6.8 Dashboard: split the page into two independent fetches and delete the
   `statsLoading || analyticsLoading` early return. The reliability half failing must not
-  blank the trigger section, and the two do not share a cohort picker — the trigger section is
-  scoped to one scholarship and year, the reliability sections span every scholarship.
-- [x] 6.9 Dashboard: keep every reliability section as it is — human-versus-human against
+  blank the trigger section. The chosen cohort is held by the page and passed to both halves —
+  see 9.4 — because the coverage figure below counts scoring for the cohort the triggers above
+  run for, and a second picker would let the two disagree on screen. The breakdowns that span
+  every scholarship are not scoped by it.
+- [x] 6.9 Dashboard: keep every reliability section — human-versus-human against
   AI-versus-human, reviewer distribution, per-criterion and per-scholarship breakdowns. They
-  are not rebuilt in this phase and not deleted; the trigger section sits above them. Where
-  there is no human score, the section says it is waiting on data and renders no number, no
-  percentage, and no empty chart.
+  are not deleted; the trigger section sits above them. Where there is no human score, the
+  section says it is waiting on data and renders no number, no percentage, and no empty chart.
+  What they read is not this change's work — see 9.5.
 - [x] 6.10 Dashboard: upload. Pick a workbook, it lands under `uploads/`, ingest reads it, and
   the screen says how many rows came in. The upload starts nothing else.
 - [x] 6.11 Dashboard: the rubric panel. Pick a rubric file, it is parsed on the way in, and the
@@ -385,15 +388,17 @@ suite and run by a person — it is the only item here with no checkbox.
 - [x] 7.26 Progress counted off the applications, not a stored run: a cohort mixing scored,
   claimed, failed, and untouched applications reports the right numbers done and left, and a
   cohort claimed by a batch job reports a wait of hours rather than reading as nearly finished.
-- 7.27 One end-to-end, slow, **a person's to run, not an agent's**: upload a small workbook
-  through the dashboard, publish `rubric.md` as a version with its weights, press score, wait
-  for the cohort to finish, rank it, open an application, and export. Against real AWS in `dev`.
-  Not part of the fast suite, and it carries no checkbox — nobody ticks this off on someone
-  else's word. Whoever runs it says what they saw.
+- 7.27 One end-to-end, slow, **a person's to run, not an agent's**: upload an export through the
+  dashboard, publish `rubric.md` as a version with its weights, press score, wait for the cohort
+  to finish, rank it, open an application, and export. Against real AWS in `dev`. This is where
+  the real file belongs, not the fast suite — `SJSU General Scholarship 25-26 ad hoc
+  report(ScholarshipManagerData (22)).csv`, 1,903 rows of the actual intake, which also puts the
+  run over the 500-row line and onto the batch path. Not part of the fast suite, and it carries no
+  checkbox — nobody ticks this off on someone else's word. Whoever runs it says what they saw.
 
 ## 8. What a review found, before the deploy
 
-Six gaps between what the earlier sections claim and what the code does. Each is small, and each
+Gaps between what the earlier sections claim and what the code does. Each is small, and each
 one leaves a screen or a file saying something that is not true, so they land before `dev` is
 deployed.
 
@@ -431,3 +436,88 @@ deployed.
   counts (8.5); a reply the model marked cut off fails with that reason and one it did not,
   containing the same text, does not (8.6). Extend `test_batch.py` and `test_reply.py` rather
   than adding files. No test for 8.1 or 8.2 — a CORS rule and a header swap are wiring.
+- [x] 8.8 Ingest reads a CSV as well as a workbook. `workers/ingest.py` picks the decoder off the
+  key's suffix — `openpyxl` for `.xlsx`, the standard library's `csv` module for `.csv` — and both
+  feed the one header check and column map that are already there. The CSV body is decoded
+  `utf-8-sig` first, `cp1252` if that raises: the real export carries Windows-1252 curly
+  apostrophes in the essays, so strict UTF-8 fails the whole file on one byte, and `cp1252` cannot
+  be the default because it maps every byte and would silently mangle a genuine UTF-8 export. Read
+  through `csv.reader` over the decoded text, never by splitting lines — most rows have an essay
+  with newlines inside its quotes. The `~$` lock-file skip stays on the workbook branch. Nothing
+  about the year, the keying, the duplicate report, or the re-ingest rules changes.
+- [x] 8.9 The three filters that decide whether a CSV is ever seen. `ComputeStack`'s EventBridge
+  rule takes two wildcard matchers, `uploads/*.xlsx` and `uploads/*.csv` — a list of matchers is
+  an OR, so this stays one prefix-and-suffix pair per entry rather than a prefix and a loose
+  suffix that would fire anywhere in the bucket. `handlers/upload.py`'s `NAME` pattern accepts
+  either suffix and its refusal message names both. `upload-panel.tsx` accepts `.xlsx,.csv` and
+  its label says so. Miss any one of the three and a CSV is refused, or worse, uploaded to a
+  prefix nothing reads and reported as landed.
+- [x] 8.10 Tests for 8.8, in `test_ingest.py` alongside the workbook fixture. The fixture is cut
+  from the real export — `SJSU General Scholarship 25-26 ad hoc report(ScholarshipManagerData
+  (22)).csv` — so it cannot drift from what the office sends: its exact 9-column header in the
+  export's own order, a handful of rows, and the three traits that break a reader kept intact — a
+  `0x92` curly apostrophe, an essay with newlines inside its quotes, and a quoted comma. Student
+  ids and essay text are replaced with synthetic values, because `.gitignore` excludes `*.csv` as
+  institutional data and the real rows are 1,903 applicants' essays. Assert: the CSV produces the
+  same applications as the equivalent workbook, a header with a byte-order mark is read rather
+  than refused, a multi-line essay arrives as one `qa_pairs` answer with its breaks, and a key
+  with some other suffix is left alone rather than failed. The formats agreeing is the whole
+  claim, so the comparison is the test. No test for 8.9 — a suffix pattern and a picker attribute
+  are wiring.
+
+## 9. What running it in `dev` turned up
+
+Everything below was found by deploying and using the thing. Each one is already done; they are
+written down here because the sections above claim otherwise and a spec nobody trusts is worse
+than none.
+
+- [x] 9.1 The cohort list. `shared/table.py` gets a `COHORTS` constant partition with
+  `<scholarship>#<year>` as the sort key, `workers/ingest.py` writes a row there carrying
+  `scholarship`, `year`, `display_name`, and `last_ingest_at`, `handlers/cohorts.py` reads it as
+  one Query, and `/api/cohorts` serves it. It is the only read that names no cohort, which is why
+  it is the one a screen can start from: a scholarship's key is a slug of the export's wording —
+  `SJSU General Scholarships` becomes `sjsu_general_scholarships` — so a typed guess reads as an
+  empty cohort and there is nothing on screen to say it was a guess.
+- [x] 9.2 `features/cohorts/cohort-picker.tsx`: one picker over that list, used by the trigger
+  section and the scholarships screen off a shared query cache so they cannot disagree about what
+  exists. Typing a pair by hand stays available and is what an empty list falls back to.
+  `useScholarshipName` gives the export's wording for a slug, so no screen prints a slug at a
+  person.
+- [x] 9.3 One written form for an academic year, in `shared/table.py`: `checked_year` takes two
+  consecutive four-digit years and `YearFormat` is raised on anything else, `shared/http.py`'s
+  `year_of` turns that into a 400 that says the form, and every cohort-scoped handler goes through
+  it. `expand_year` and `year_in_filename` are the one exception — the office names its export
+  `25-26`, so ingest expands the short form and nothing else accepts one. The year is half of a
+  cohort's key, so `2026`, `26-27`, and `2026-2027` are three partitions and two are always
+  empty; without the check a typo reads as a cohort with nothing in it. `apps/web/src/lib/
+  academic-year.ts` is the same rule on screen, so the form is stated before a call is made.
+- [x] 9.4 The dashboard's chosen cohort is held by `dashboard-page.tsx` and passed to the trigger
+  section and the reliability section. Two pickers let the triggers run one cohort while the
+  coverage figure counted another, with nothing on screen saying they differed.
+- [x] 9.5 A whole-reply markdown fence is taken off before the reply is checked —
+  `shared/reply.py`'s `FENCED` and `unfenced`. The model wraps its JSON whatever the prompt says,
+  and an unwrapped fence failed every application in a run. `fullmatch`, not a search: the fence
+  is a wrapper and taking it off is not a repair, but pulling an object out of surrounding prose
+  would be, and that stays a failure.
+- [x] 9.6 The site ships with the stack. `EdgeStack` publishes `apps/web/dist` to the site bucket
+  with `prune` on and a `/*` invalidation. It cannot build the app — `config.ts` reads the pool
+  ids out of the bundle and the same stack produces them — so a new environment is deploy, build,
+  deploy. No build on disk is a warning that names the command, not an empty bucket over a
+  working site.
+- [x] 9.7 The batch worker's own Bedrock policy. `CreateModelInvocationJob` is authorized against
+  the model as well as the job, and the `bedrock:InvokeModel` statement does not cover it — it is
+  a different action. Without the model ARN on the create statement every submit came back denied
+  on the inference profile. **The fix is in `compute-stack.ts` and is not deployed** — until
+  `dev-ComputeStack` is deployed, `dev-score-batch` still fails on every submit.
+- [x] 9.8 Tests for the above: the year form accepts `2026-2027`, refuses `2026`, `26-27`, and
+  `2026-2028` with the form named, and `year_in_filename` reads both the long and the short form
+  and refuses a name with neither (9.3); a fenced reply passes and one with prose around the
+  object fails (9.5); `run-state.ts`, `score-state.ts`, and `list-rows.ts` cover the screen-side
+  state each was extracted for. No test for 9.1, 9.2, 9.4, 9.6, or 9.7 — a Query on one
+  partition, a picker, lifted state, a bucket deployment, and a policy statement are wiring.
+
+**Not in this change.** The reviewer-score comparison — reader scores ingested from the office's
+score export, an agreement read, and the flagged queue the reliability section calls `/agreement`
+for — is its own capability and its own change. This checkout has the screen half and no route
+behind it, so that half of the dashboard is a 404 today. It is named here so nobody reads section
+6.9 as a claim that it works.

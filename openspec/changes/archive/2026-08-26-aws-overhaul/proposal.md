@@ -105,13 +105,14 @@ The web app already has three screens. Phase 4 gives each one its job under the 
 
 | Screen | Its job in phase 4 | Where it came from |
 | --- | --- | --- |
-| Dashboard | A trigger section, and for now that is all: upload a workbook, publish and pick a rubric, every Lambda trigger, progress. The reliability analysis is kept in the code below it, not rebuilt | Built as a read-only reliability argument off last year's human scores. That argument is kept — it is waiting on data, not wrong — and the trigger section is added above it |
+| Dashboard | A trigger section, and for now that is all: pick a cohort, upload an export, publish and pick a rubric, every Lambda trigger, progress. The reliability analysis is kept below it | Built as a read-only reliability argument off last year's human scores. That argument is kept — it is waiting on data, not wrong — and the trigger section is added above it |
 | Scholarships | Search a cohort, rank it by score highest or lowest, read the per-criterion scores, export | Already the ranked-list screen with a filter panel on top. Same job; the filter panel is extended into the advanced search |
 | Reviews | Nothing yet. It says sign-off is not built | Built as the human-review queue with tiebreaker submission — exactly the capability we deferred |
 
-- **The dashboard carries the upload.** A person picks a workbook there and it lands in the
-  uploads prefix, where ingest reads it. That is the only way an export gets in, and the only
-  thing the upload sets off — the file landing does not start scoring.
+- **The dashboard carries the upload.** A person picks an export there — an `.xlsx` or a `.csv`,
+  since the office sends both — and it lands in the uploads prefix, where ingest reads it. That
+  is the only way an export gets in, and the only thing the upload sets off — the file landing
+  does not start scoring.
 - **The dashboard carries the rubric.** A person uploads a rubric's text there, types a weight
   beside each criterion the parse found, checks what came out, and publishes it as a version.
   The trigger section picks which published version a run is for, defaulting to the newest.
@@ -125,12 +126,18 @@ The web app already has three screens. Phase 4 gives each one its job under the 
   a cohort Query already returns each one's state, so done, running, and left are counts over
   data already fetched. No run record is stored, because nothing about a run is not already on
   the items.
-- **Nothing on the dashboard is deleted, and nothing but the trigger section is rebuilt.** The
-  reliability sections belong to a different feature that is only waiting on last year's reader
-  scores, so they stay as they are and say they are waiting on data. What they cannot do is hold
-  up the new work: the upload, the triggers, and the progress counts depend on no human score,
-  fetch on their own, and are scoped to one cohort while the reliability sections span every
-  scholarship.
+- **Nothing on the dashboard is deleted.** The reliability sections belong to a different
+  feature, waiting on reader scores being stored and a read that returns the comparison — both
+  the reviewer-score change's work, not this one's. They stay, and they say what they are waiting
+  on. What they cannot do is hold up the new work: the upload, the triggers, and the progress
+  counts depend on no human score and fetch on their own. The one thing the two halves share is
+  the cohort a person picked, held by the page, so the coverage figure below cannot describe a
+  different cohort from the triggers above.
+- **A screen offers the cohorts that exist rather than asking for a key.** A scholarship's key is
+  a slug of the export's own wording, so a typed guess reads as an empty cohort and nothing says
+  it was a guess. One read, naming no cohort, returns what has been ingested; every other read is
+  addressed with a choice from it. An academic year has one written form — `2026-2027` — and a
+  call naming a cohort refuses anything else, because the year is half of the key.
 - **The scholarships screen carries the search window.** Scoped to a scholarship and a year:
   find an application, rank the cohort, open one and read its per-criterion scores and evidence.
   The advanced search is the filter panel already in
@@ -182,7 +189,7 @@ The web app already has three screens. Phase 4 gives each one its job under the 
   dependency and no second styling approach; if it looks like they need one, that is a
   decision to raise, not something to install while building.
 
-With `human-in-the-loop` deferred, this is the end of the line: the pipeline goes workbook
+With `human-in-the-loop` deferred, this is the end of the line: the pipeline goes export
 in, score stored, score found and read.
 
 **No name column.** The export is anonymized — the `Student` column is a UUID, and that UUID
@@ -240,7 +247,7 @@ two Lambdas fit together as taken.
 What must not carry over. Each of these is covered by a requirement in the spec:
 
 - **A re-upload wipes scores.** The parser writes with `put_item`, which replaces the
-  whole item, so re-ingesting a workbook drops `llm_weighted_score`, `criterion_scores`,
+  whole item, so re-ingesting an export drops `llm_weighted_score`, `criterion_scores`,
   and `needs_human_review`, and resets `status` to `parsed`.
 - **The application key is the student UUID alone.** The same student in two years is one
   item, and the second ingest overwrites the first. `batch_writer(overwrite_by_pkeys=...)`

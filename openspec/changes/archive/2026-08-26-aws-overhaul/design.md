@@ -30,7 +30,7 @@ See `proposal.md` — Why. The constraints that shape the design, and nothing el
 
 - One CDK app that defines everything, deployable from nothing to a working environment.
 - One hostname per environment, so the API needs no CORS. The single exception is the
-  browser's PUT of a workbook straight to S3, which the bucket answers with one rule.
+  browser's PUT of an export straight to S3, which the bucket answers with one rule.
 - Scoring that cannot run without someone asking, cannot double-score an application, and
   cannot turn a truncated model reply into a real score.
 - Screens that read the pipeline honestly: part-scored looks part-scored, unreviewed says
@@ -108,7 +108,7 @@ and a preflight on every non-GET. Nothing gained for an internal app.
 
 ### The one cross-origin request is the upload, and the bucket answers it
 
-A workbook goes from the browser to the bucket with a presigned PUT, so a few thousand rows
+An export goes from the browser to the bucket with a presigned PUT, so a few thousand rows
 never pass through a Lambda. That URL is on the bucket's own hostname, and a PUT is never a
 simple request, so the browser preflights it — and S3 answers a preflight only if the bucket
 carries a CORS rule. So it carries exactly one: `PUT` alone, origins the environment's
@@ -126,6 +126,45 @@ and a limit nobody can raise.
 *Alternative — a `/uploads/` behaviour on the distribution.* Keeps the PUT same-origin, but a
 presigned S3 URL signs the S3 hostname, so it cannot be used through CloudFront. It would take
 CloudFront signed URLs, a key group, a public key in the stack, and an OAC that permits writes.
+
+### Two file formats, one row reader
+
+The office exports the intake either way, so ingest takes an `.xlsx` and a `.csv`. The split is
+at decoding only: `openpyxl` for a workbook, the standard library's `csv` module for a CSV, and
+both hand back the same thing — a header line and rows after it. Everything past that point is
+shared, which is what keeps the two formats from drifting into two column maps. Nothing about
+the cohort changes: the scholarship comes from the `AvailabilityId_t` column and the year from
+the file name, neither of which a sheet tab was ever involved in.
+
+**A CSV out of Scholarship Manager is not UTF-8, so the encoding is tried in order.** The export
+we have — 1,903 rows of the SJSU General 25-26 intake — carries `0x92` bytes, the Windows-1252
+curly apostrophe, inside the essays. Read as strict UTF-8 that is not a bad character, it is a
+`UnicodeDecodeError`, and the whole file fails on one apostrophe. So a CSV is decoded as
+`utf-8-sig` first and as `cp1252` if that raises. The order is what makes it safe: UTF-8 is
+self-validating, so a file that decodes clean as UTF-8 almost certainly is UTF-8, while `cp1252`
+maps every possible byte and therefore can never fail — reaching for it first would turn a real
+UTF-8 export into mojibake with nothing raised to say so.
+
+`utf-8-sig` rather than `utf-8` for the same reason the fallback exists. A spreadsheet program
+saving UTF-8 puts a byte-order mark in front of the first column name; left on, the header check
+sees a first column that matches nothing and refuses the file for having no header row — a true
+statement about the bytes and a useless one to the person who exported it. The file we have has
+no BOM, but the one someone re-saves out of Excel will.
+
+**Fields run across lines, so the `csv` module reads them, never a line split.** 1,377 of those
+1,903 rows have an essay with a newline inside its quotes, and the longest single field is 5,261
+characters. Anything that treats a line as a record turns most of the intake into fragments that
+resolve to no student.
+
+Three filters have to name both suffixes, and each one silently drops the file if it does not:
+the EventBridge rule on the bucket, the upload handler's filename check, and the file picker on
+the dashboard. The rule takes two wildcard matchers rather than a suffix list, because a list of
+matchers is an OR and `uploads/` with a bare suffix would also fire on a file anywhere else in
+the bucket. The `~$` lock-file skip stays workbook-only — that is a thing Office does, and a CSV
+never has one.
+
+*Alternative — convert a CSV to a workbook on the way in.* One reader downstream, but it means a
+conversion step that can fail on its own, and it would rewrite the file kept as provenance.
 
 ### The API is called with the ID token, not the access token
 
@@ -305,7 +344,7 @@ the claims with the reason recorded.
 `detail.batchJobName` and nothing about applications. There is no index on `claimed_by`, so a
 job identifier alone gives a Query no partition to read. The job name would be the obvious
 carrier and is not usable: 63 characters, no spaces, `[a-zA-Z0-9]` with limited punctuation,
-while a scholarship name is raw text off a spreadsheet sheet tab. So the collector calls
+while a scholarship name is raw text out of an export column. So the collector calls
 `GetModelInvocationJob` and takes the cohort out of `inputDataConfig.s3InputDataConfig.s3Uri`
 — the worker chose that key when it submitted, so the key is where the cohort is written down.
 The job name stays human-readable-ish for the console, and `clientRequestToken` keeps a
@@ -373,25 +412,26 @@ the limit on a boundary that happens to parse.
 
 ### Phase 4: the dashboard is a trigger section, and the rest is left alone
 
-For this phase the dashboard is one thing: the trigger section — the workbook upload, the rubric
+For this phase the dashboard is one thing: the trigger section — the export upload, the rubric
 panel and its version picker, the four triggers, and progress. That is what gets built. The
 reliability sections already on the screen — the
 human-versus-human against AI-versus-human comparison, the reviewer distribution, and the
-per-criterion and per-scholarship breakdowns — are kept where they are, below it, and are not
-rebuilt. They are a different feature waiting on last year's reader scores, which IT has not
-delivered.
+per-criterion and per-scholarship breakdowns — are kept where they are, below it. They are a
+different feature, waiting on reader scores being stored and a read that returns the comparison.
+Both belong to the reviewer-score change, not this one, so what that half reads is settled there.
 
 | Half | Depends on | Scope | This phase |
 | --- | --- | --- | --- |
 | Trigger section | the cohort Query only | one scholarship and year | built |
-| Reliability analysis | last year's reader scores | every scholarship | kept as it is, says waiting on data |
+| Reliability analysis | reviewer scores and an agreement read | every scholarship, except the coverage figure | kept, says waiting on data |
 
-Two things follow from that split, and both are the reason it is a split rather than one
-screen. Each half fetches on its own: the reliability query failing must not blank the
-triggers, which means they cannot share a loading gate — the current screen returns early on
-`statsLoading || analyticsLoading` for the whole page, and that early return is what has to
-go. And they cannot share a cohort picker, because the trigger section is about one cohort
-while a per-scholarship breakdown is about all of them.
+The split is about the fetch, not the choice. Each half fetches on its own, because the
+reliability query failing must not blank the triggers — the current screen returns early on
+`statsLoading || analyticsLoading` for the whole page, and that early return is what has to go.
+The cohort a person picked goes the other way: the page holds it and hands it to both, because
+the coverage figure below counts scoring for the cohort the triggers above run for. Two pickers
+let those two numbers describe different cohorts with nothing on screen admitting it. The
+breakdowns that span every scholarship take no cohort and are unaffected.
 
 Where a reliability section has nothing, it says so rather than rendering a zero, a percentage
 of nothing, or an empty chart — any of which reads as a result.
@@ -636,10 +676,11 @@ settle.
   seconds. → Hashed filenames plus a no-cache `index.html`, so the worst case is one stale
   page load, not a broken app.
 
-- **The reliability half of the dashboard is dead weight until IT delivers.** It renders
-  "waiting on data" indefinitely and nobody can tell whether it works. → It is kept because
-  the feature is coming, and it is kept independent so it cannot break the half that does
-  work. If the data never arrives, deleting it is a later decision, not this change's.
+- **The reliability half of the dashboard has no route behind it in this change.** The screen
+  calls an agreement read that the reviewer-score change owns, so here it can only fail. → It is
+  kept, kept independent so it cannot break the half that does work, and it says the comparison
+  is not built rather than reporting a failed fetch as agreement. Nobody should be able to look
+  at it and think a small gap was measured.
 
 - **`font-mondwest` is used in `features/applications/applications-table.tsx` and defined
   in no stylesheet.** A dead class that will silently fall back. → Remove it when that file
@@ -648,15 +689,19 @@ settle.
 ## Migration Plan
 
 There is nothing to migrate. The stores were destroyed, so the first deploy comes up empty
-and a workbook has to be uploaded before any screen has something to show.
+and an export has to be uploaded before any screen has something to show.
 
 Deploy order, once per environment:
 
 1. `cdk bootstrap` — one time, in `dxhub-automation`.
-2. `DataStack`, then `EdgeStack`. Data first because everything else references it.
+2. `DataStack`, then `EdgeStack`. Data first because everything else references it. This first
+   pass warns that there is no web build to publish, which is expected — the build needs the ids
+   this pass produces.
 3. Create the first user in the pool by hand. There is no public sign-up.
-4. Build the web app with the pool id and sign-in domain, upload, invalidate.
-5. Upload a workbook from the dashboard, so the scholarship has a cohort.
+4. Build the web app with the pool id and sign-in domain, then deploy again. The deploy publishes
+   the build and invalidates the distribution; a new environment is deploy, build, deploy, and
+   after that a deploy publishes whatever the last build wrote.
+5. Upload an export from the dashboard, so the scholarship has a cohort.
 6. Publish the first rubric version from the dashboard — `rubric.md` uploaded, weights
    10/40/30/10/10 typed in. Nothing can be scored before a version exists, because the prompt,
    the range check, and the total are all built from it.
