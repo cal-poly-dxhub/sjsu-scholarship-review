@@ -51,6 +51,25 @@ def test_the_criteria_come_from_the_rubric() -> None:
         check_reply(reply([("grit", 4), ("clarity", 4)]), FIXTURE_CRITERIA)
 
 
+def test_a_fenced_reply_is_read_and_prose_around_one_is_not() -> None:
+    """The fence is a wrapper to take off; anything else around the object stays a failure.
+
+    A fenced reply failed every application in a run, so this is the case that earns the strip.
+    The prose case is the line: unwrapping is not permission to hunt for JSON in a paragraph.
+    """
+    body = reply([("grit", 1), ("clarity", 4)])
+
+    for fenced in (f"```json\n{body}\n```", f"```\n{body}\n```", f"  ```json\n{body}```  "):
+        assert check_reply(fenced, FIXTURE_CRITERIA).reasoning_summary == "A reasonable application."
+
+    with pytest.raises(ReplyError, match="not JSON"):
+        check_reply(f"Here are the scores:\n```json\n{body}\n```", FIXTURE_CRITERIA)
+
+    # An unclosed fence is what a truncated reply looks like, and it must not half-parse.
+    with pytest.raises(ReplyError, match="not JSON"):
+        check_reply(f"```json\n{body}", FIXTURE_CRITERIA)
+
+
 def test_a_cut_off_reply_is_told_apart_by_what_the_model_said() -> None:
     """The message has to send whoever reads it at the token limit, not at the JSON.
 

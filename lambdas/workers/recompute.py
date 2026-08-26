@@ -4,9 +4,13 @@ No model call: each total is the stored per-criterion scores over their own maxi
 new weights. The per-criterion scores are not rewritten and no score item is written — a score
 item is the record of a model attempt, and no attempt happened here.
 
-A criteria change is not this worker's job. `recomputable` only hands back applications whose
-stored version matches the target on everything the model saw, so anything else stays where it
-is and needs a rescore.
+A criteria change is not this worker's job. `recomputable` only hands back totals whose stored
+version matches the target on everything the model saw, so anything else stays where it is and
+needs a rescore.
+
+Each total moves within its own model. A cohort scored on two models has a row per model, and a
+recompute writes each one at the new version under the model that made it — arithmetic never
+changes whose number it is.
 """
 
 from __future__ import annotations
@@ -18,8 +22,16 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from shared.scores import cohort_of
-from shared.table import rank_pk, table, to_dynamo
+from shared.table import (
+    UNKNOWN_MODEL,
+    application_sk,
+    cohort_pk,
+    rank_pk,
+    set_of,
+    table,
+    to_dynamo,
+    total_sk,
+)
 from shared.work import recomputable, rubric_version_item
 
 logger = logging.getLogger()
@@ -27,8 +39,8 @@ logger.setLevel(logging.INFO)
 
 WORKER = "recompute"
 
-# Stop with this much of the Lambda's time left. A partly recomputed cohort is readable —
-# every application says which version its total came from — so stopping early is safe.
+# Stop with this much of the Lambda's time left. A partly recomputed cohort is readable — each
+# total's own key says which version and model it is for — so stopping early is safe.
 RESERVE_MS = 10_000
 
 
@@ -58,7 +70,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             total = recomputed_total(item["category_scores"], weights)
         except Unusable as error:
             counts["unusable"] += 1
-            problems.append({"application": item["sk"], "reason": str(error)})
+            problems.append({"total": item["sk"], "reason": str(error)})
             continue
 
         if move(item=item, stored=stored, version=version, total=total):
@@ -105,34 +117,75 @@ def recomputed_total(category_scores: dict[str, Any], weights: dict[str, float])
 
 
 def move(*, item: dict[str, Any], stored: str, version: str, total: float) -> bool:
-    """Write the new total and version, and move the ranking key with them.
+    """Move one total from the set it is in to the same model's set at `version`.
 
-    Conditional on the version the item was read at, so a scoring run that reached this
-    application first keeps its score — a recompute never overwrites a newer number. That
-    condition is the whole of the concurrency control here; there is no claim, because the
-    write is one update and takes no time to lose.
+    The new row is written only if that set has no total for this application yet, so a scoring
+    run that already produced a real number there keeps it — a recompute never overwrites one.
+    That condition is the whole of the concurrency control here; there is no claim, because each
+    write is one call and takes no time to lose. The old row goes only after the new one lands,
+    so a failure in between leaves a duplicate total rather than none.
     """
-    scholarship, year, _ = cohort_of(item)
+    _, scholarship, year = str(item["pk"]).split("#", 2)
+    _, model, student = set_of(str(item["sk"]))
+    at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
     try:
-        table().update_item(
-            Key={"pk": item["pk"], "sk": item["sk"]},
-            UpdateExpression=(
-                "SET total_score = :total, rubric_version = :version, rank_pk = :rank,"
-                " recomputed_at = :at"
-            ),
-            ConditionExpression="rubric_version = :stored",
-            ExpressionAttributeValues=to_dynamo(
+        table().put_item(
+            Item=to_dynamo(
                 {
-                    ":total": total,
-                    ":version": version,
-                    ":rank": rank_pk(scholarship, year, version),
-                    ":at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-                    ":stored": stored,
+                    "pk": item["pk"],
+                    "sk": total_sk(version, model, student),
+                    "student_uuid": student,
+                    "rubric_version": version,
+                    "model_id": model,
+                    "total_score": total,
+                    "category_scores": item["category_scores"],
+                    "rank_pk": rank_pk(scholarship, year, version, model),
+                    "scored_at": item.get("scored_at"),
+                    "recomputed_at": at,
                 }
             ),
+            ConditionExpression="attribute_not_exists(sk)",
         )
     except ClientError as error:
         if error.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
         return False
+
+    table().delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
+    move_copy(
+        scholarship=scholarship, year=year, student=student, stored=stored, model=model,
+        version=version, total=total, at=at,
+    )
     return True
+
+
+def move_copy(
+    *, scholarship: str, year: str, student: str, stored: str, model: str, version: str,
+    total: float, at: str,
+) -> None:
+    """Move the application's copy of its newest total too, if the copy is the row that moved.
+
+    The badges and the state counts read the copy off the application item. A copy pointing at
+    another set is someone else's newest total and is left alone.
+    """
+    unknown = model == UNKNOWN_MODEL
+    condition = "rubric_version = :stored AND " + (
+        "attribute_not_exists(model_id)" if unknown else "model_id = :model"
+    )
+    values: dict[str, Any] = {":total": total, ":version": version, ":at": at, ":stored": stored}
+    if not unknown:
+        values[":model"] = model
+
+    try:
+        table().update_item(
+            Key={"pk": cohort_pk(scholarship, year), "sk": application_sk(student)},
+            UpdateExpression=(
+                "SET total_score = :total, rubric_version = :version, recomputed_at = :at"
+            ),
+            ConditionExpression=condition,
+            ExpressionAttributeValues=to_dynamo(values),
+        )
+    except ClientError as error:
+        if error.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise

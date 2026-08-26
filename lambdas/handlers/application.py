@@ -9,8 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from shared.http import BadRequest, query_param, reply
-from shared.reads import application
+from shared.http import BadRequest, query_param, reply, year_of
+from shared.reads import application, scores_by_set
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -19,7 +19,7 @@ log.setLevel(logging.INFO)
 def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
     try:
         scholarship = query_param(event, "scholarship")
-        year = query_param(event, "year")
+        year = year_of(query_param(event, "year"))
         student = query_param(event, "student")
     except BadRequest as error:
         return reply(400, {"message": str(error)})
@@ -36,6 +36,9 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
             # None when nothing has been scored yet, or when the attempt that would have
             # written it failed. The application's own state says which.
             "score": score,
+            # One line per rubric version and model this application has been scored on, so two
+            # models can be read against each other here. Empty when nothing has been scored.
+            "sets": scores_by_set(scholarship, year, student),
             "reviewed": False,
         },
     )

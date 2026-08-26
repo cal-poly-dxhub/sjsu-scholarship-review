@@ -140,6 +140,20 @@ def test_a_version_that_was_never_published_is_refused(
     assert started.started == []
 
 
+def test_a_year_in_another_form_is_refused_rather_than_run_against_an_empty_cohort(
+    table: Any, started: Invocations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'2026' is a partition nothing was ever written to, so a run over it would find no work."""
+    put_version(table, "v1", CRITERIA)
+    work_of(monkeypatch, 10)
+
+    response = run.handler(request(year="2026"), None)
+
+    assert response["statusCode"] == 400
+    assert "2025-2026" in answer(response)["message"]
+    assert started.started == []
+
+
 def test_the_scope_reaches_the_worker_and_an_unknown_one_is_refused(
     table: Any, started: Invocations, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -158,6 +172,39 @@ def test_the_scope_reaches_the_worker_and_an_unknown_one_is_refused(
     monkeypatch.setattr(run, "recomputable", lambda **_: [({"sk": "APP#one"}, "v0")])
     run.handler(request(action="recompute"), None)
     assert "scope" not in started.started[-1]
+
+
+def test_a_model_off_the_list_is_refused_with_the_list_named(
+    table: Any, started: Invocations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Let through, it comes back as a Bedrock access denial inside a worker holding claims."""
+    put_version(table, "v1", CRITERIA)
+    work_of(monkeypatch, 5)
+
+    response = run.handler(request(model_id="us.anthropic.claude-sonnet-9"), None)
+    body = answer(response)
+
+    assert response["statusCode"] == 400
+    assert "us.anthropic.claude-sonnet-9" in body["message"]
+    assert body["models"] == list(run.MODEL_IDS)
+    assert started.started == []
+
+
+def test_a_run_that_names_no_model_gets_the_default_and_says_which(
+    table: Any, started: Invocations, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_version(table, "v1", CRITERIA)
+    work_of(monkeypatch, 5)
+
+    body = answer(run.handler(request(), None))
+
+    assert body["model_id"] == "us.anthropic.claude-sonnet-4-6"
+    assert started.started[0]["model_id"] == "us.anthropic.claude-sonnet-4-6"
+
+    # And a named model travels to the worker instead of the default.
+    picked = "us.anthropic.claude-opus-4-6-v1"
+    assert answer(run.handler(request(model_id=picked), None))["model_id"] == picked
+    assert started.started[-1]["model_id"] == picked
 
 
 def test_a_recompute_goes_to_its_own_worker(

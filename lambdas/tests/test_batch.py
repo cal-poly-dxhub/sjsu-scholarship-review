@@ -12,6 +12,7 @@ from typing import Any
 import boto3
 import pytest
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 from shared.model import Answer
 from shared.prompt import static_prefix
@@ -26,6 +27,9 @@ JOB_ID = "deadbeef00"
 RUN_PREFIX = f"batch/{SCHOLARSHIP}/{YEAR}/v1/{JOB}/"
 INPUT_URI = f"s3://{BUCKET}/{RUN_PREFIX}in/records.jsonl"
 OUTPUT_URI = f"s3://{BUCKET}/{RUN_PREFIX}out/"
+
+# The collector takes the model off the job it is collecting, not off the default.
+JOB_MODEL = "us.anthropic.claude-opus-4-6-v1"
 
 CRITERIA = [
     {"id": "grit", "name": "Grit", "max": 2, "weight": 40, "guidance": "", "levels": []},
@@ -59,6 +63,7 @@ class Bedrock:
         return {
             "inputDataConfig": {"s3InputDataConfig": {"s3Uri": INPUT_URI}},
             "outputDataConfig": {"s3OutputDataConfig": {"s3Uri": OUTPUT_URI}},
+            "modelId": JOB_MODEL,
         }
 
 
@@ -166,6 +171,44 @@ def test_a_record_carries_the_same_prompt_as_an_on_demand_call_and_nothing_more(
     assert line["recordId"] == "one"
     assert set(line) == {"recordId", "modelInput"}
     assert set(line["modelInput"]) == {"messages", "inferenceConfig"}
+
+
+def test_a_submission_bedrock_refuses_frees_every_claim_and_submits_nothing(
+    table: Any, bucket: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Left claimed, the cohort reads as running for two days and no run can take it."""
+    put_version(table, "v1", CRITERIA)
+    for student in ("one", "two"):
+        put_application(table, student)
+    monkeypatch.setattr(score_batch, "minimum_batch_records", lambda: None)
+
+    class Refusing:
+        @staticmethod
+        def create_model_invocation_job(**_: Any) -> dict[str, Any]:
+            raise ClientError(
+                {"Error": {"Code": "ValidationException", "Message": "no batch for that model"}},
+                "CreateModelInvocationJob",
+            )
+
+    monkeypatch.setattr(score_batch, "bedrock", lambda: Refusing)
+
+    with pytest.raises(score_batch.BatchError) as refused:
+        score_batch.submit(
+            {
+                "scholarship": SCHOLARSHIP,
+                "year": YEAR,
+                "rubric_version": "v1",
+                "model_id": JOB_MODEL,
+            },
+            Context(),
+        )
+
+    assert JOB_MODEL in str(refused.value)
+    assert "no batch for that model" in str(refused.value)
+    for student in ("one", "two"):
+        item = read(table, student)
+        assert item["status"] == "parsed"
+        assert "claimed_by" not in item
 
 
 def test_each_record_lands_on_the_application_whose_id_it_is(table: Any, collecting: Any) -> None:

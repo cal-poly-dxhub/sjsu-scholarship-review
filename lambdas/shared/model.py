@@ -1,19 +1,27 @@
-"""The model call, and which failures are worth another go.
+"""The model call, which models may make it, and which failures are worth another go.
 
 Retries for a throttle or a five-hundred are left to botocore, which already backs off. What
 this module adds is the line between a failure that means "try again later" and one that means
 "this item cannot be scored" — a throttle written down as `score_failed` would be a permanent
 verdict on a temporary problem.
+
+The allowed models arrive as one environment variable, filled from the same list in the CDK that
+builds the Bedrock policy. A second copy here would drift, and the way you would find out is a
+denied call halfway through a cohort.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+MODEL_IDS = tuple(os.environ["MODEL_IDS"].split(","))
+DEFAULT_MODEL_ID = os.environ["DEFAULT_MODEL_ID"]
 
 # Anything not in this set is the item's own problem and is not retried.
 TRANSIENT = {
@@ -29,6 +37,22 @@ _client = None
 
 class Transient(Exception):
     """The model could not answer now. The item stays claimable."""
+
+
+class UnknownModel(ValueError):
+    """A model nobody may score with. The message names the ones they may."""
+
+
+def checked_model(asked: str | None) -> str:
+    """The model a run will use. None takes the default; anything off the list is refused."""
+    if asked is None:
+        return DEFAULT_MODEL_ID
+    if asked not in MODEL_IDS:
+        raise UnknownModel(
+            f"'{asked}' is not a model this platform scores with. It is one of:"
+            f" {', '.join(MODEL_IDS)}."
+        )
+    return asked
 
 
 @dataclass(frozen=True)

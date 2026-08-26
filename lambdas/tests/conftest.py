@@ -16,7 +16,12 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 os.environ.setdefault("AWS_SESSION_TOKEN", "testing")
 os.environ.setdefault("TABLE_NAME", "test-scholarship")
 os.environ.setdefault("BUCKET_NAME", "test-bucket")
-os.environ.setdefault("MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+os.environ.setdefault(
+    "MODEL_IDS",
+    "us.anthropic.claude-opus-4-6-v1,us.anthropic.claude-sonnet-4-6,"
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+)
+os.environ.setdefault("DEFAULT_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 os.environ.setdefault("BATCH_ROLE_ARN", "arn:aws:iam::123456789012:role/test-bedrock-batch")
 os.environ.setdefault("ONDEMAND_FUNCTION", "test-score-ondemand")
 os.environ.setdefault("BATCH_FUNCTION", "test-score-batch")

@@ -22,7 +22,7 @@ from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from shared.claims import BATCH_CLAIM, claim, mark_failed, release
-from shared.model import Answer, text_of
+from shared.model import Answer, checked_model, text_of
 from shared.prompt import applicant_text, static_prefix
 from shared.quota import minimum_batch_records
 from shared.reply import ReplyError, check_reply
@@ -33,7 +33,6 @@ from shared.work import claimable, rubric_version_item
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-MODEL_ID = os.environ["MODEL_ID"]
 BUCKET = os.environ["BUCKET_NAME"]
 BATCH_ROLE_ARN = os.environ["BATCH_ROLE_ARN"]
 
@@ -78,6 +77,7 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
     scholarship = event["scholarship"]
     year = event["year"]
     version = event["rubric_version"]
+    model = checked_model(event.get("model_id"))
 
     rubric = rubric_version_item(scholarship, version)
     prefix = static_prefix(rubric)
@@ -87,6 +87,7 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
         scholarship=scholarship,
         year=year,
         rubric_version=version,
+        model_id=model,
         scope=event.get("scope"),
         limit=event.get("limit"),
     )
@@ -95,7 +96,7 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
         for item in items
         if claim(
             pk=item["pk"], sk=item["sk"], claimed_by=job, rubric_version=version,
-            holds=BATCH_CLAIM,
+            model_id=model, holds=BATCH_CLAIM,
         )
     ]
 
@@ -111,7 +112,7 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
             )
         raise BatchError(
             f"{len(claimed)} applications is below the {floor} records a batch job for"
-            f" {MODEL_ID} needs. Nothing was submitted and the items are free again."
+            f" {model} needs. Nothing was submitted and the items are free again."
             " Score this set on demand instead."
         )
 
@@ -129,7 +130,7 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
         response = bedrock().create_model_invocation_job(
             jobName=job,
             roleArn=BATCH_ROLE_ARN,
-            modelId=MODEL_ID,
+            modelId=model,
             # The job name is unique to this invocation, so a Lambda retry finds the job it
             # already created instead of making a second one over the same claimed items.
             clientRequestToken=job,
@@ -142,18 +143,26 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
             },
             timeoutDurationInHours=JOB_HOURS,
         )
-    except ClientError:
+    except ClientError as error:
+        # Every model on the list can take a batch job today. This is the backstop for the day one
+        # cannot: the run is refused with the model named, not quietly moved to the on-demand path.
         for item in claimed:
             release(
                 pk=item["pk"], sk=item["sk"], claimed_by=job,
-                reason="the batch job was not accepted",
+                reason=f"the batch job was not accepted for {model}",
             )
-        raise
+        raise BatchError(
+            f"Bedrock would not take a batch job for {model}:"
+            f" {error.response['Error'].get('Message', error)}."
+            f" Nothing was submitted and all {len(claimed)} applications are free again."
+            " The on-demand path can score this set on that model."
+        ) from error
 
     report = {
         "worker": WORKER,
         "job": job,
         "job_arn": response["jobArn"],
+        "model_id": model,
         "found": len(items),
         "claimed": len(claimed),
         "minimum_records": floor if floor is not None else "not checkable",
@@ -201,6 +210,9 @@ def collect(detail: dict[str, Any]) -> dict[str, Any]:
     input_uri = described["inputDataConfig"]["s3InputDataConfig"]["s3Uri"]
     output_uri = described["outputDataConfig"]["s3OutputDataConfig"]["s3Uri"]
     scholarship, year, version = cohort_from(input_uri)
+    # The job is the record of which model ran it. Reading it back beats trusting the default,
+    # which may have changed in the hours since the job was submitted.
+    model = str(described["modelId"])
 
     held = mine(scholarship, year, job)
 
@@ -245,7 +257,7 @@ def collect(detail: dict[str, Any]) -> dict[str, Any]:
             continue
 
         outcome = apply_line(
-            item=item, line=line, criteria=criteria, version=version, job=job
+            item=item, line=line, criteria=criteria, version=version, model=model, job=job
         )
         counts[outcome] += 1
 
@@ -256,6 +268,7 @@ def collect(detail: dict[str, Any]) -> dict[str, Any]:
         "scholarship": scholarship,
         "year": year,
         "rubric_version": version,
+        "model_id": model,
         "held": len(held),
         **counts,
         **checked_against_manifest(output_uri, job_arn, counts),
@@ -269,7 +282,7 @@ def collect(detail: dict[str, Any]) -> dict[str, Any]:
 
 def apply_line(
     *, item: dict[str, Any], line: dict[str, Any], criteria: list[dict[str, Any]],
-    version: str, job: str,
+    version: str, model: str, job: str,
 ) -> str:
     """One output line onto one application. The claim still naming the job is the condition."""
     if "modelOutput" not in line:
@@ -294,7 +307,7 @@ def apply_line(
             reply=checked,
             criteria=criteria,
             rubric_version=version,
-            model_id=MODEL_ID,
+            model_id=model,
             worker=WORKER,
             input_tokens=answer.input_tokens,
             output_tokens=answer.output_tokens,

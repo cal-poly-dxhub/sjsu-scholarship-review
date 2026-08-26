@@ -1,5 +1,6 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Annotations, CfnOutput, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
@@ -9,11 +10,15 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import type { Construct } from 'constructs';
 import type { EnvStackProps } from './env';
 
 /** So the Vite dev server can sign in against the same pool. Matches `vite.config.ts`. */
 const DEV_SERVER_ORIGIN = 'http://localhost:3000';
+
+/** The Vite build output. Not in git, so a fresh clone has to build before it can publish. */
+const SITE_BUILD = path.join(__dirname, '..', '..', 'apps', 'web', 'dist');
 
 /**
  * The front door: sign-in, the site bucket, the CloudFront distribution, and the HTTP API.
@@ -172,6 +177,29 @@ export class EdgeStack extends Stack {
       // No minimumProtocolVersion: without a custom certificate CloudFront pins its own
       // security policy and setting it would only look like a control that is not there.
     });
+
+    // The site ships with the stack, the way the Lambdas do. What it cannot do is build itself:
+    // `config.ts` reads the pool ids out of the bundle, so the build needs values this stack
+    // produces. A brand new environment is therefore two passes — deploy, build, deploy — and
+    // after that a deploy publishes whatever `pnpm --filter @sjsu/web build` last wrote.
+    if (fs.existsSync(SITE_BUILD)) {
+      new s3deploy.BucketDeployment(this, 'SiteContents', {
+        sources: [s3deploy.Source.asset(SITE_BUILD)],
+        destinationBucket: this.siteBucket,
+        // The bucket holds nothing but the site, so last build's files are dead weight.
+        prune: true,
+        distribution: this.distribution,
+        // The shell is on CACHING_DISABLED and the assets are fingerprinted, so this changes
+        // nothing on a normal deploy. It is here for the deploy that moves a file between those
+        // two behaviours, where the old copy would otherwise be served from a cached path.
+        distributionPaths: ['/*'],
+      });
+    } else {
+      Annotations.of(this).addWarning(
+        `No web build at ${SITE_BUILD}, so this deploy leaves the site bucket as it is. Run` +
+          ' pnpm --filter @sjsu/web build first to publish the app.',
+      );
+    }
 
     const siteUrl = `https://${this.distribution.domainName}`;
 

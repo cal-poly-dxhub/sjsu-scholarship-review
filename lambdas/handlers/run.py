@@ -1,11 +1,12 @@
-"""POST to start a run for one cohort and one rubric version.
+"""POST to start a run for one cohort, one rubric version, and one model.
 
-The rubric version decides the outer scope: an application already stored at that version is not
-work. Three of the dashboard's four triggers — score the unscored, rescore what changed, retry
-what failed — are `action: score` with a `scope` that narrows it further, so each takes the work
-its label names and nothing else.
+The version and the model together decide the outer scope: an application that already has a
+total for that pair is not work, and one scored at the same version by another model is. Four of
+the dashboard's five triggers — score the unscored, rescore what changed, retry what failed, and
+score what another model scored — are `action: score` with a `scope` that narrows it further, so
+each takes the work its label names and nothing else.
 
-The fourth is `action: recompute`, and it is a different job: a version that changed weights and
+The fifth is `action: recompute`, and it is a different job: a version that changed weights and
 nothing else moves a total by arithmetic over scores already stored, with no model call.
 
 The worker is invoked and not waited on. Progress is counted off the cohort read, because
@@ -21,7 +22,8 @@ from typing import Any
 
 import boto3
 
-from shared.http import BadRequest, body_of, reply
+from shared.http import BadRequest, body_of, reply, year_of
+from shared.model import MODEL_IDS, UnknownModel, checked_model
 from shared.quota import minimum_batch_records
 from shared.work import SCOPES, MissingRubric, claimable, recomputable, rubric_version_item
 
@@ -45,13 +47,18 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
     try:
         body = body_of(event)
         scholarship = text(body, "scholarship")
-        year = text(body, "year")
+        year = year_of(text(body, "year"))
         version = text(body, "rubric_version")
         action = one_of(body, "action", ACTIONS, ACTIONS[0])
         scope = scope_of(body)
         asked = path_of(body)
+        model = checked_model(body.get("model_id"))
     except BadRequest as error:
         return reply(400, {"message": str(error)})
+    except UnknownModel as error:
+        # Refused here, before a single application is claimed. A model the list does not carry
+        # would otherwise come back from Bedrock as an access denial inside a worker.
+        return reply(400, {"message": str(error), "models": list(MODEL_IDS)})
 
     try:
         rubric_version_item(scholarship, version)
@@ -62,7 +69,13 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
         return recompute(scholarship, year, version)
 
     work = len(
-        claimable(scholarship=scholarship, year=year, rubric_version=version, scope=scope)
+        claimable(
+            scholarship=scholarship,
+            year=year,
+            rubric_version=version,
+            model_id=model,
+            scope=scope,
+        )
     )
     if work == 0:
         return reply(
@@ -71,8 +84,9 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
                 "work": 0,
                 "action": "score",
                 "scope": scope,
+                "model_id": model,
                 "started": False,
-                "message": nothing_to_do(scholarship, year, version, scope),
+                "message": nothing_to_do(scholarship, year, version, model, scope),
             },
         )
 
@@ -104,11 +118,11 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
             )
 
     function = BATCH_FUNCTION if chosen == "batch" else ONDEMAND_FUNCTION
-    start(function, scholarship, year, version, scope)
+    start(function, scholarship, year, version, scope, model)
 
     log.info(
-        "started %s for %s %s at %s over %d applications (scope: %s)",
-        chosen, scholarship, year, version, work, scope or "everything out of date",
+        "started %s for %s %s at %s on %s over %d applications (scope: %s)",
+        chosen, scholarship, year, version, model, work, scope or "everything out of date",
     )
     return reply(
         202,
@@ -117,6 +131,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
             "action": "score",
             "scope": scope,
             "path": chosen,
+            "model_id": model,
             "started": True,
             "wait": "hours" if chosen == "batch" else "seconds to minutes",
             # Two people pressing the button do not double-score: the claim is conditional, so
@@ -126,6 +141,9 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
                 if chosen == "ondemand"
                 else "A batch job takes hours. The cohort is not nearly finished while it runs."
             ),
+            # Said on every start, because the picker is where someone chooses a second model and
+            # would reasonably wonder what happens to the first one's numbers.
+            "leaves_alone": "Totals from other models stay exactly as they are.",
         },
     )
 
@@ -167,7 +185,12 @@ def recompute(scholarship: str, year: str, version: str) -> dict[str, Any]:
 
 
 def start(
-    function: str, scholarship: str, year: str, version: str, scope: str | None
+    function: str,
+    scholarship: str,
+    year: str,
+    version: str,
+    scope: str | None,
+    model: str | None = None,
 ) -> None:
     """Hand the cohort to a worker and stop waiting on it."""
     payload: dict[str, Any] = {
@@ -177,6 +200,9 @@ def start(
     }
     if scope:
         payload["scope"] = scope
+    # A recompute is arithmetic over stored scores, so it is started without one.
+    if model:
+        payload["model_id"] = model
     boto3.client("lambda").invoke(
         FunctionName=function,
         # Nothing waits: the worker claims as it goes and the screen counts progress off the
@@ -186,11 +212,21 @@ def start(
     )
 
 
-def nothing_to_do(scholarship: str, year: str, version: str, scope: str | None) -> str:
-    """Why a run found no work, said in terms of what the button asked for."""
+def nothing_to_do(
+    scholarship: str, year: str, version: str, model: str, scope: str | None
+) -> str:
+    """Why a run found no work, said in terms of what the button asked for.
+
+    Both halves of the set are named. A run finds nothing for a version *and* a model, and the
+    same cohort can have plenty of work left on another model.
+    """
     where = f"{scholarship} {year}"
+    on = f"{version} on {model}"
     if scope == "unscored":
-        return f"Nothing to do: every application in {where} has been scored at least once."
+        return (
+            f"Nothing to do: every application in {where} already has a total at {on}. Totals"
+            " from other models are untouched."
+        )
     if scope == "failed":
         return (
             f"Nothing to do: no application in {where} is failed, or the failed ones have run"
@@ -201,9 +237,14 @@ def nothing_to_do(scholarship: str, year: str, version: str, scope: str | None) 
             f"Nothing to do: no application in {where} carries a rubric version other than"
             f" {version}."
         )
+    if scope == "other_model":
+        return (
+            f"Nothing to do: no application in {where} has a total at {version} from a model"
+            f" other than {model}."
+        )
     return (
-        f"Nothing to do: every application in {where} already carries {version}, or has run out"
-        " of attempts."
+        f"Nothing to do: every application in {where} already has a total at {on}, or has run"
+        " out of attempts."
     )
 
 

@@ -4,11 +4,15 @@ A reply is accepted only if it carries every criterion the rubric names, with id
 match and every score a whole or half point inside its own maximum. Anything else is a
 failure: there is no partial parse, no salvage, and no repair step. A repaired reply is a
 score the model did not give.
+
+Taking a markdown fence off the whole reply is the one exception, and it is not a repair: the
+object inside is read exactly as the model wrote it.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +39,12 @@ class CheckedReply:
 # What Bedrock says when a reply ran into the output token limit.
 CUT_OFF = "max_tokens"
 
+# The whole reply in a fence, and nothing outside it. Claude wraps its answer this way whatever
+# the prompt says not to, and an unwrapped fence failed every application in a run. Matching the
+# entire reply rather than searching it keeps this to the wrapper: a reply with prose around the
+# object is a different problem and still a failure.
+FENCED = re.compile(r"\s*```(?:json)?\s*(\{.*\})\s*```\s*", re.DOTALL)
+
 
 def check_reply(
     raw: str, criteria: list[dict[str, Any]], *, stop_reason: str = ""
@@ -52,7 +62,7 @@ def check_reply(
             " the limit rather than reading this as a bad reply"
         )
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(unfenced(raw))
     except json.JSONDecodeError as error:
         raise ReplyError(f"the reply is not JSON: {error.msg} at position {error.pos}") from error
     if not isinstance(parsed, dict):
@@ -96,6 +106,12 @@ def check_reply(
         scores=[seen[criterion["id"]] for criterion in criteria],
         reasoning_summary=summary.strip(),
     )
+
+
+def unfenced(raw: str) -> str:
+    """The reply with its markdown fence taken off, or the reply as it came if it had none."""
+    found = FENCED.fullmatch(raw)
+    return found.group(1) if found else raw
 
 
 def weighted_total(scores: list[CriterionScore], criteria: list[dict[str, Any]]) -> float:

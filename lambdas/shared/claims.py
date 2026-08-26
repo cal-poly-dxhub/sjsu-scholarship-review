@@ -33,9 +33,14 @@ PARSED = "parsed"
 SCORED = "scored"
 FAILED = "score_failed"
 
+# The middle clause is the set guard: an item whose newest total is already this version on this
+# model is not claimable. It catches the race that the work read cannot — a second run of the same
+# set that listed its work before the first run's totals were written. An item scored at this
+# version by a *different* model passes it, which is the whole point.
 CLAIMABLE = (
     "(attribute_not_exists(#status) OR #status <> :processing OR claimed_until < :now)"
-    " AND (attribute_not_exists(rubric_version) OR rubric_version <> :version)"
+    " AND (attribute_not_exists(rubric_version) OR rubric_version <> :version"
+    " OR attribute_not_exists(model_id) OR model_id <> :model)"
     " AND (attribute_not_exists(attempt) OR attempt < :limit)"
 )
 
@@ -50,6 +55,7 @@ def claim(
     sk: str,
     claimed_by: str,
     rubric_version: str,
+    model_id: str,
     holds: timedelta = ONDEMAND_CLAIM,
 ) -> bool:
     """Take an item for this run. False means someone else has it, or it is out of attempts."""
@@ -69,6 +75,7 @@ def claim(
                 ":until": (moment + holds).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 ":now": moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 ":version": rubric_version,
+                ":model": model_id,
                 ":limit": ATTEMPT_LIMIT,
                 ":zero": 0,
                 ":one": 1,
@@ -96,7 +103,11 @@ def release(*, pk: str, sk: str, claimed_by: str, reason: str) -> bool:
 
 
 def mark_failed(*, pk: str, sk: str, claimed_by: str, reason: str) -> bool:
-    """Fail an item and clear what a score would have said, so nothing shows a stale score."""
+    """Fail an item and clear the application's copy of a score, so no badge shows a stale one.
+
+    Only the copy. A total another model's run wrote is its own row and stays exactly as it was —
+    a run that failed says nothing about a number a different model already produced.
+    """
     return _let_go(
         pk=pk,
         sk=sk,
@@ -104,7 +115,7 @@ def mark_failed(*, pk: str, sk: str, claimed_by: str, reason: str) -> bool:
         update=(
             "SET #status = :failed, failure = :reason"
             " REMOVE claimed_by, claimed_until, category_scores, total_score, rubric_version,"
-            " rank_pk, latest_scored_at"
+            " model_id, latest_scored_at"
         ),
         values={":failed": FAILED, ":reason": reason},
     )

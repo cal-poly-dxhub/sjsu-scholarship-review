@@ -21,13 +21,16 @@ from .claims import FAILED, PROCESSING, SCORED, now
 from .table import (
     RANK_INDEX_NAME,
     TABLE_NAME,
+    UNKNOWN_MODEL,
     application_pk,
     application_sk,
     cohort_pk,
     from_dynamo,
     rank_pk,
     score_sk,
+    set_of,
     table,
+    total_prefix,
 )
 
 # What a list, a search, and the counts need. `qa_pairs` is left out, and so are the fields
@@ -35,16 +38,14 @@ from .table import (
 # `source`, `claimed_by`.
 COHORT_FIELDS = (
     "pk, sk, student_uuid, scholarship, #year, #status, academic_program, academic_level,"
-    " major, gpa, category_scores, total_score, rubric_version, rank_pk, latest_scored_at,"
-    " claimed_until, attempt, failure, last_error, parsed_at"
+    " major, gpa, category_scores, total_score, rubric_version, model_id,"
+    " latest_scored_at, claimed_until, attempt, failure, last_error, parsed_at"
 )
 
 # The index projects these, so asking for more would fetch the base item and undo the point
-# of a narrow projection.
-RANKED_FIELDS = (
-    "pk, sk, rank_pk, total_score, #status, rubric_version, category_scores, latest_scored_at,"
-    " academic_program, academic_level, major, gpa"
-)
+# of a narrow projection. A ranked row is a total, so the applicant's own fields are not on it —
+# the screen joins to the cohort read by student uuid, which comes out of the row's own key.
+RANKED_FIELDS = "pk, sk, rank_pk, total_score, rubric_version, category_scores"
 
 NAMES = {"#status": "status", "#year": "year"}
 
@@ -77,8 +78,98 @@ def cohort(scholarship: str, year: str) -> list[dict[str, Any]]:
             return found
 
 
-def counts(applications: list[dict[str, Any]]) -> dict[str, Any]:
-    """What the cohort is doing. This is the whole of run progress — no run item is stored."""
+def set_key(rubric_version: str, model_id: str) -> str:
+    """How a set is named in a count and asked for by a screen: one version, one model."""
+    return f"{rubric_version}#{model_id}"
+
+
+def set_counts(scholarship: str, year: str) -> dict[str, int]:
+    """How many totals the cohort holds in each set. Keys only — the numbers are not read here.
+
+    Every set present is counted, including ones no screen is showing, because a set nobody
+    names reads as missing totals rather than as totals somewhere else.
+    """
+    found: dict[str, int] = {}
+    start_key: dict[str, Any] | None = None
+    while True:
+        request: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(cohort_pk(scholarship, year))
+            & Key("sk").begins_with(total_prefix()),
+            "ProjectionExpression": "sk",
+        }
+        if start_key:
+            request["ExclusiveStartKey"] = start_key
+        page = table().query(**request)
+        for item in page.get("Items", []):
+            version, model, _ = set_of(str(item["sk"]))
+            key = set_key(version, model)
+            found[key] = found.get(key, 0) + 1
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            return found
+
+
+def set_totals(
+    scholarship: str, year: str, rubric_version: str, model_id: str
+) -> list[dict[str, Any]]:
+    """Every total in one set, by prefix. Each carries the student it belongs to."""
+    found: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    while True:
+        request: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(cohort_pk(scholarship, year))
+            & Key("sk").begins_with(total_prefix(rubric_version, model_id)),
+        }
+        if start_key:
+            request["ExclusiveStartKey"] = start_key
+        page = table().query(**request)
+        found.extend(from_dynamo(item) for item in page.get("Items", []))
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            return found
+
+
+# The application item's copy of its newest total. A screen showing one set replaces all of
+# them together, so a row never mixes one set's number with another's per-criterion scores.
+SET_FIELDS = ("total_score", "category_scores", "rubric_version", "model_id", "latest_scored_at")
+
+
+def with_set(
+    applications: list[dict[str, Any]], totals: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Each application carrying one set's total, or none if that set has no total for it.
+
+    The item keeps a copy of its newest total whatever set made it, so without this a row would
+    read as scored on a model it was never scored on. Everything else about the item — status,
+    the claim, the failure — is left as it is.
+    """
+    by_student = {str(total["student_uuid"]): total for total in totals}
+    shaped = []
+    for item in applications:
+        total = by_student.get(str(item.get("student_uuid")))
+        if total is None:
+            shaped.append({**item, **dict.fromkeys(SET_FIELDS)})
+            continue
+        shaped.append(
+            {
+                **item,
+                "total_score": total.get("total_score"),
+                "category_scores": total.get("category_scores"),
+                "rubric_version": total.get("rubric_version"),
+                "model_id": total.get("model_id"),
+                "latest_scored_at": total.get("scored_at"),
+            }
+        )
+    return shaped
+
+
+def counts(applications: list[dict[str, Any]], sets: dict[str, int]) -> dict[str, Any]:
+    """What the cohort is doing. This is the whole of run progress — no run item is stored.
+
+    The states come off the application items, which hold the claim and the newest total.
+    `scored_by_set` comes off the totals themselves, so a cohort scored on two models reports
+    both counts rather than only the newer one.
+    """
     moment = now()
     states = {"scored": 0, "unscored": 0, "running": 0, "failed": 0}
     versions: dict[str, int] = {}
@@ -97,7 +188,12 @@ def counts(applications: list[dict[str, Any]]) -> dict[str, Any]:
             # A claim that has expired is work again, whatever `status` still says.
             states["unscored"] += 1
 
-    return {"total": len(applications), "states": states, "scored_by_rubric_version": versions}
+    return {
+        "total": len(applications),
+        "states": states,
+        "scored_by_rubric_version": versions,
+        "scored_by_set": sets,
+    }
 
 
 def ranked(
@@ -105,16 +201,24 @@ def ranked(
     scholarship: str,
     year: str,
     rubric_version: str,
+    model_id: str,
     highest_first: bool = True,
     limit: int = PAGE,
     cursor: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """One page of a cohort's comparable totals, in the order the index holds them."""
+    """One page of one set's totals, in the order the index holds them.
+
+    A ranking is one rubric version and one model, because that is what the partition is. The
+    index does not project the student uuid or the model, so both are read back out of each
+    row's own sort key — the screen joins to the cohort read on the uuid for the applicant's
+    fields.
+    """
     request: dict[str, Any] = {
         "IndexName": RANK_INDEX_NAME,
-        "KeyConditionExpression": Key("rank_pk").eq(rank_pk(scholarship, year, rubric_version)),
+        "KeyConditionExpression": Key("rank_pk").eq(
+            rank_pk(scholarship, year, rubric_version, model_id)
+        ),
         "ProjectionExpression": RANKED_FIELDS,
-        "ExpressionAttributeNames": {"#status": "status"},
         # The index is in ascending total order, so reading backwards is what "highest" means.
         "ScanIndexForward": not highest_first,
         "Limit": min(max(limit, 1), MAX_PAGE),
@@ -123,7 +227,13 @@ def ranked(
         request["ExclusiveStartKey"] = decode_cursor(cursor)
 
     page = table().query(**request)
-    items = [from_dynamo(item) for item in page.get("Items", [])]
+    items = []
+    for row in page.get("Items", []):
+        shaped = from_dynamo(row)
+        version, model, student = set_of(str(shaped["sk"]))
+        items.append(
+            {**shaped, "rubric_version": version, "model_id": model, "student_uuid": student}
+        )
     return items, encode_cursor(page.get("LastEvaluatedKey"))
 
 
@@ -155,6 +265,50 @@ def application(
     )
     score_item = score.get("Item")
     return application_item, from_dynamo(score_item) if score_item else None
+
+
+def scores_by_set(scholarship: str, year: str, student_uuid: str) -> list[dict[str, Any]]:
+    """One line per set this application has been scored in: its newest attempt in that set.
+
+    Read off the score items, which have carried the model since they were first written, so
+    comparing two models on one applicant needs no other read. Newest first.
+    """
+    newest: dict[str, dict[str, Any]] = {}
+    start_key: dict[str, Any] | None = None
+    while True:
+        request: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(application_pk(scholarship, year, student_uuid))
+            & Key("sk").begins_with("SCORE#"),
+            "ProjectionExpression": "sk, total_score, rubric_version, model_id, #status",
+            "ExpressionAttributeNames": {"#status": "status"},
+            # The sort key is the timestamp, so backwards is newest first and the first hit for
+            # a set is the one kept.
+            "ScanIndexForward": False,
+        }
+        if start_key:
+            request["ExclusiveStartKey"] = start_key
+        page = table().query(**request)
+        for row in page.get("Items", []):
+            item = from_dynamo(row)
+            if item.get("status") != "ok" or item.get("total_score") is None:
+                continue
+            # A score item written before the model was recorded belongs to the unknown set,
+            # not to today's default.
+            version = str(item.get("rubric_version", "unknown"))
+            model = str(item.get("model_id", UNKNOWN_MODEL))
+            key = set_key(version, model)
+            newest.setdefault(
+                key,
+                {
+                    "rubric_version": version,
+                    "model_id": model,
+                    "total_score": item["total_score"],
+                    "scored_at": str(item["sk"]).removeprefix("SCORE#"),
+                },
+            )
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            return sorted(newest.values(), key=lambda one: one["scored_at"], reverse=True)
 
 
 def newest_scores(

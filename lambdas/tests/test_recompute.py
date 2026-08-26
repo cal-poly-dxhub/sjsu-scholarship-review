@@ -9,11 +9,20 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from shared.table import rank_pk
+from shared.table import cohort_pk, rank_pk, total_sk
 from shared.work import claimable, recomputable
 from shared.versions import weights_only_change
 from workers import recompute
 from helpers import SCHOLARSHIP, YEAR, put_scored, put_version, read
+
+SONNET = "us.anthropic.claude-sonnet-4-6"
+OPUS = "us.anthropic.claude-opus-4-6-v1"
+
+
+def total_row(table: Any, student: str, version: str, model: str) -> dict[str, Any] | None:
+    return table.get_item(
+        Key={"pk": cohort_pk(SCHOLARSHIP, YEAR), "sk": total_sk(version, model, student)}
+    ).get("Item")
 
 V1 = [
     {"id": "grit", "name": "Grit", "max": 2, "weight": 40, "guidance": "", "levels": []},
@@ -52,7 +61,7 @@ def test_a_weight_only_change_is_recomputable_and_a_criteria_change_is_not() -> 
 def test_a_weight_only_change_recomputes_from_stored_scores_with_no_model_call(table: Any) -> None:
     put_version(table, "v1", V1)
     put_version(table, "v2", with_weights(60, 40))
-    put_scored(table, "one", total=80, version="v1", category_scores=STORED_SCORES)
+    put_scored(table, "one", total=80, version="v1", model=SONNET, category_scores=STORED_SCORES)
 
     report = recompute.handler(
         {"scholarship": SCHOLARSHIP, "year": YEAR, "rubric_version": "v2"}, Context()
@@ -61,14 +70,41 @@ def test_a_weight_only_change_recomputes_from_stored_scores_with_no_model_call(t
     assert report["moved"] == 1
     assert report["model_calls"] == 0
 
-    application = read(table, "one")
+    # The total moves to the new version under the model that made it, ranking key and all.
+    moved = total_row(table, "one", "v2", SONNET)
+    assert moved is not None
     # 1/2×60 + 5/5×40, against 1/2×40 + 5/5×60 before.
+    assert float(moved["total_score"]) == 70
+    assert moved["model_id"] == SONNET
+    assert moved["rank_pk"] == rank_pk(SCHOLARSHIP, YEAR, "v2", SONNET)
+    assert total_row(table, "one", "v1", SONNET) is None
+
+    application = read(table, "one")
     assert float(application["total_score"]) == 70
     assert application["rubric_version"] == "v2"
-    assert application["rank_pk"] == rank_pk(SCHOLARSHIP, YEAR, "v2")
     # The per-criterion scores are not rewritten to get there, and no attempt is recorded.
     assert application["category_scores"] == STORED_SCORES
     assert application["latest_scored_at"] == "2026-08-01T00:00:00.000000Z"
+
+
+def test_a_recompute_moves_each_models_total_and_keeps_them_apart(table: Any) -> None:
+    """Arithmetic never changes whose number it is: two sets in, two sets out."""
+    put_version(table, "v1", V1)
+    put_version(table, "v2", with_weights(60, 40))
+    put_scored(table, "both", total=80, version="v1", model=SONNET, category_scores=STORED_SCORES)
+    # A second model's total for the same application, at the same version.
+    put_scored(table, "both", total=80, version="v1", model=OPUS, category_scores=STORED_SCORES)
+
+    report = recompute.handler(
+        {"scholarship": SCHOLARSHIP, "year": YEAR, "rubric_version": "v2"}, Context()
+    )
+
+    assert report["moved"] == 2
+    for model in (SONNET, OPUS):
+        moved = total_row(table, "both", "v2", model)
+        assert moved is not None and moved["model_id"] == model
+        assert float(moved["total_score"]) == 70
+        assert total_row(table, "both", "v1", model) is None
 
 
 def test_a_criteria_change_is_left_for_a_rescore(table: Any) -> None:
@@ -85,7 +121,9 @@ def test_a_criteria_change_is_left_for_a_rescore(table: Any) -> None:
     assert float(read(table, "one")["total_score"]) == 80
 
     # It is work for a scoring run instead, which is what costs the model calls.
-    scoped = claimable(scholarship=SCHOLARSHIP, year=YEAR, rubric_version="v2")
+    scoped = claimable(
+        scholarship=SCHOLARSHIP, year=YEAR, rubric_version="v2", model_id=SONNET
+    )
     assert [item["sk"] for item in scoped] == ["APP#one"]
 
 

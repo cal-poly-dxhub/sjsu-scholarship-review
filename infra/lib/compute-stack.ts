@@ -39,11 +39,25 @@ const CODE_EXCLUDE = [
 const REQUIREMENTS_DIR = path.join(CODE_ROOT, 'requirements');
 
 /**
- * The model both scoring workers call. A `us.` id is a cross-region inference profile, so a
- * call can land in any US region and the policy has to allow the model there as well as the
- * profile here.
+ * The models a run may be scored by, strongest first. A `us.` id is a cross-region inference
+ * profile, so a call can land in any US region and the policy has to allow the model there as
+ * well as the profile here. Every id is copied from `list-inference-profiles` — they follow no
+ * pattern, and two of these three carry no version suffix.
+ *
+ * All three answer Converse and all three can take a batch job in us-west-2. A model that cannot
+ * do both does not belong here: the choice must not decide which triggers still work.
  */
-const MODEL_ID = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+const MODEL_IDS = [
+  'us.anthropic.claude-opus-4-6-v1', // the strongest, and the most expensive
+  'us.anthropic.claude-sonnet-4-6', // the everyday one
+  'us.anthropic.claude-haiku-4-5-20251001-v1:0', // cheap and fast
+];
+
+/** What a run that named no model gets: the middle tier, so nobody is quietly given the cheapest. */
+const DEFAULT_MODEL_ID = 'us.anthropic.claude-sonnet-4-6';
+
+/** The list as the Python side reads it. One variable, so the two cannot drift. */
+const MODEL_ENV = { MODEL_IDS: MODEL_IDS.join(','), DEFAULT_MODEL_ID };
 
 /** The Lambdas: route handlers, the ingest worker, and the two scoring workers. */
 export class ComputeStack extends Stack {
@@ -78,6 +92,15 @@ export class ComputeStack extends Stack {
     });
     props.table.grantReadWriteData(publish);
     this.route('RubricPublishRoute', apigwv2.HttpMethod.POST, '/api/rubric-versions', publish);
+
+    // The only read that names no cohort, so it is the one a screen can start from.
+    const cohorts = this.pythonFunction('Cohorts', {
+      name: 'cohorts',
+      handler: 'handlers.cohorts.handler',
+      description: 'Every cohort that has been ingested, so nobody has to guess a slug.',
+    });
+    props.table.grantReadData(cohorts);
+    this.route('CohortsRoute', apigwv2.HttpMethod.GET, '/api/cohorts', cohorts);
 
     // The two reads every screen uses. Read-only on the table, and neither touches the bucket.
     const cohort = this.pythonFunction('Cohort', {
@@ -118,8 +141,8 @@ export class ComputeStack extends Stack {
     const ingest = this.pythonFunction('Ingest', {
       name: 'ingest',
       handler: 'workers.ingest.handler',
-      description: 'Reads an uploaded workbook and writes its applications into the cohort.',
-      // A workbook is a few thousand rows and every row is a read plus a write.
+      description: 'Reads an uploaded export and writes its applications into the cohort.',
+      // An export is a few thousand rows and every row is a read plus a write.
       timeout: Duration.minutes(10),
       memorySize: 1024,
       layers: [
@@ -128,17 +151,23 @@ export class ComputeStack extends Stack {
     });
     props.table.grantReadWriteData(ingest);
     props.bucket.grantRead(ingest, `${BUCKET_PREFIXES.uploads}*`);
-    new events.Rule(this, 'UploadedWorkbook', {
-      ruleName: `${props.envName}-uploaded-workbook`,
-      description: 'A workbook landing under uploads/ starts the ingest worker.',
+    new events.Rule(this, 'UploadedExport', {
+      ruleName: `${props.envName}-uploaded-export`,
+      description: 'An export landing under uploads/ starts the ingest worker.',
       eventPattern: {
         source: ['aws.s3'],
         detailType: ['Object Created'],
         detail: {
           bucket: { name: [props.bucket.bucketName] },
-          // One wildcard, not a prefix and a suffix: a list of matchers is an OR, so those two
-          // would also fire on a .xlsx anywhere in the bucket.
-          object: { key: [{ wildcard: `${BUCKET_PREFIXES.uploads}*.xlsx` }] },
+          // One wildcard per format, each carrying the prefix. A list of matchers is an OR, so
+          // splitting these into a prefix and two suffixes would also fire on a .csv anywhere
+          // in the bucket — including the batch/ files the scoring worker writes.
+          object: {
+            key: [
+              { wildcard: `${BUCKET_PREFIXES.uploads}*.xlsx` },
+              { wildcard: `${BUCKET_PREFIXES.uploads}*.csv` },
+            ],
+          },
         },
       },
       targets: [new targets.LambdaFunction(ingest)],
@@ -152,7 +181,7 @@ export class ComputeStack extends Stack {
       // not on one item.
       timeout: Duration.minutes(15),
       memorySize: 512,
-      environment: { MODEL_ID },
+      environment: MODEL_ENV,
     });
     props.table.grantReadWriteData(onDemand);
     onDemand.addToRolePolicy(
@@ -170,7 +199,7 @@ export class ComputeStack extends Stack {
       timeout: Duration.minutes(15),
       memorySize: 1024,
       environment: {
-        MODEL_ID,
+        ...MODEL_ENV,
         BUCKET_NAME: props.bucket.bucketName,
         BATCH_ROLE_ARN: batchRole.roleArn,
       },
@@ -180,10 +209,16 @@ export class ComputeStack extends Stack {
     });
     props.table.grantReadWriteData(batch);
     props.bucket.grantReadWrite(batch, `${BUCKET_PREFIXES.batch}*`);
+    // Creating a job is checked against the model it will run as well as the job itself, so the
+    // model has to be named here too. With only the job ARN every submit comes back denied on the
+    // inference profile, and the InvokeModel statement below does not cover it — different action.
     batch.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['bedrock:CreateModelInvocationJob', 'bedrock:GetModelInvocationJob'],
-        resources: [`arn:aws:bedrock:${this.region}:${this.account}:model-invocation-job/*`],
+        resources: [
+          `arn:aws:bedrock:${this.region}:${this.account}:model-invocation-job/*`,
+          ...this.modelResources(),
+        ],
       }),
     );
     batch.addToRolePolicy(
@@ -219,12 +254,12 @@ export class ComputeStack extends Stack {
     });
     props.table.grantReadWriteData(recompute);
 
-    // The dashboard's two writes: a URL to upload a workbook to, and starting a run. Both are
+    // The dashboard's two writes: a URL to upload an export to, and starting a run. Both are
     // last so the run route can name the workers it invokes.
     const upload = this.pythonFunction('Upload', {
       name: 'upload',
       handler: 'handlers.upload.handler',
-      description: 'Hands out a URL for uploading one workbook to the uploads prefix.',
+      description: 'Hands out a URL for uploading one export to the uploads prefix.',
       environment: { BUCKET_NAME: props.bucket.bucketName },
     });
     props.bucket.grantPut(upload, `${BUCKET_PREFIXES.uploads}*`);
@@ -238,6 +273,7 @@ export class ComputeStack extends Stack {
       timeout: Duration.seconds(29),
       memorySize: 512,
       environment: {
+        ...MODEL_ENV,
         ONDEMAND_FUNCTION: onDemand.functionName,
         BATCH_FUNCTION: batch.functionName,
         RECOMPUTE_FUNCTION: recompute.functionName,
@@ -356,13 +392,16 @@ export class ComputeStack extends Stack {
     });
   }
 
-  /** The inference profile and the foundation model behind it. Nothing else in Bedrock. */
+  /**
+   * Every allowed model's inference profile and the foundation model behind it. Nothing else in
+   * Bedrock. Built from the same list the workers validate against, so a model a person can pick
+   * is always a model the worker is permitted to call.
+   */
   private modelResources(): string[] {
-    const foundation = MODEL_ID.replace(/^us\./, '');
-    return [
-      `arn:aws:bedrock:*::foundation-model/${foundation}`,
-      `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/${MODEL_ID}`,
-    ];
+    return MODEL_IDS.flatMap((id) => [
+      `arn:aws:bedrock:*::foundation-model/${id.replace(/^us\./, '')}`,
+      `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/${id}`,
+    ]);
   }
 
   private route(

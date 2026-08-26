@@ -1,6 +1,9 @@
-"""Ingest worker: an uploaded workbook becomes application items in a cohort partition.
+"""Ingest worker: an uploaded export becomes application items in a cohort partition.
 
-Every write is an `update_item`, never a `put_item`. A re-ingest of the same workbook has
+The export is a workbook or a CSV. Only the decoding differs; the header check, the column
+map, and everything after them are shared, so the two formats cannot drift apart.
+
+Every write is an `update_item`, never a `put_item`. A re-ingest of the same export has
 to leave `category_scores`, `total_score`, and `rubric_version` where they are — a put
 would drop them and the cohort would look unscored.
 
@@ -12,6 +15,7 @@ essays is not comparable to the rest of the cohort.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
 import json
@@ -22,15 +26,31 @@ from typing import Any, Iterator
 
 import boto3
 import openpyxl
+from boto3.dynamodb.conditions import Key
 
 from shared.claims import PARSED
 from shared.rubric import slug
-from shared.table import application_sk, cohort_pk, table, to_dynamo
+from shared.table import (
+    COHORTS_PK,
+    YearFormat,
+    application_sk,
+    cohort_index_sk,
+    cohort_pk,
+    set_of,
+    table,
+    to_dynamo,
+    total_prefix,
+    year_in_filename,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 UPLOAD_PREFIX = os.environ.get("UPLOAD_PREFIX", "uploads/")
+
+# The two ways the office exports the intake. Anything else under the prefix is somebody
+# else's file, so it is left alone rather than failed.
+SUFFIXES = (".xlsx", ".csv")
 
 # The export's own column names. This is the shape of the file, not the shape of a rubric —
 # no criterion, maximum, or weight is named here.
@@ -64,8 +84,6 @@ ESSAYS = [
 # Fields the ingest owns. Everything else on an application belongs to scoring or review.
 OWNED = ("academic_program", "major", "academic_level", "gpa", "qa_pairs")
 
-YEAR_LENGTH = 5  # "25-26"
-
 
 class IngestError(Exception):
     """The file cannot be ingested at all. Nothing was written."""
@@ -77,10 +95,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     bucket = detail["bucket"]["name"]
     key = detail["object"]["key"]
 
-    if not key.startswith(UPLOAD_PREFIX) or not key.endswith(".xlsx"):
-        logger.info("Not a workbook under %s, left alone: %s", UPLOAD_PREFIX, key)
+    if not key.startswith(UPLOAD_PREFIX) or not key.endswith(SUFFIXES):
+        logger.info("Not an export under %s, left alone: %s", UPLOAD_PREFIX, key)
         return {"skipped": key}
-    if key.split("/")[-1].startswith("~$"):
+    if key.endswith(".xlsx") and key.split("/")[-1].startswith("~$"):
         logger.info("Office lock file, left alone: %s", key)
         return {"skipped": key}
 
@@ -88,16 +106,17 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def ingest_file(bucket: str, key: str) -> dict[str, Any]:
-    """Read one workbook and write its applications. Returns what happened, row by row."""
+    """Read one export and write its applications. Returns what happened, row by row."""
     filename = key.split("/")[-1]
     year = year_from(filename)
 
     rows = read_rows(bucket, key)
-    applications, skipped, duplicates = collect(rows, year=year, source_file=key)
+    applications, skipped, duplicates, names = collect(rows, year=year, source_file=key)
 
     written = 0
     unchanged = 0
     rescore = 0
+    changed: dict[str, set[str]] = {}
     for application in applications:
         outcome = store(application)
         if outcome == "unchanged":
@@ -106,14 +125,26 @@ def ingest_file(bucket: str, key: str) -> dict[str, Any]:
             written += 1
             if outcome == "changed":
                 rescore += 1
+                changed.setdefault(application["scholarship"], set()).add(
+                    application["student_uuid"]
+                )
+
+    dropped = sum(
+        drop_totals(scholarship, year, students) for scholarship, students in changed.items()
+    )
+
+    for scholarship, display_name in names.items():
+        remember_cohort(scholarship, year, display_name)
 
     report = {
         "file": key,
         "year": year,
+        "cohorts": sorted(names),
         "rows_read": len(applications) + len(skipped) + len(duplicates),
         "applications_written": written,
         "unchanged": unchanged,
         "marked_for_scoring_again": rescore,
+        "totals_dropped": dropped,
         "skipped_rows": skipped,
         "duplicate_rows": duplicates,
     }
@@ -122,23 +153,18 @@ def ingest_file(bucket: str, key: str) -> dict[str, Any]:
 
 
 def year_from(filename: str) -> str:
-    """The academic year out of the file name. A guessed year would build a wrong cohort."""
-    for index in range(len(filename) - YEAR_LENGTH + 1):
-        chunk = filename[index : index + YEAR_LENGTH]
-        if chunk[:2].isdigit() and chunk[2] == "-" and chunk[3:].isdigit():
-            return chunk
-    raise IngestError(
-        f"'{filename}' has no academic year in its name, so there is no cohort to write to."
-        " Name the file with the year, as in 'SJSU General Scholarship 25-26.xlsx'."
-    )
+    """The cohort's academic year, in the one form every read addresses it by."""
+    try:
+        return year_in_filename(filename)
+    except YearFormat as error:
+        raise IngestError(str(error)) from error
 
 
 def read_rows(bucket: str, key: str) -> Iterator[dict[str, Any]]:
-    """Rows as dicts keyed by the header line. Read-only so a large workbook stays cheap."""
+    """Rows as dicts keyed by the header line, from a workbook or a CSV."""
     body = boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
-    sheet = openpyxl.load_workbook(io.BytesIO(body), read_only=True, data_only=True).worksheets[0]
+    raw = csv_rows(body) if key.endswith(".csv") else workbook_rows(body)
 
-    raw = sheet.iter_rows(values_only=True)
     try:
         header = next(raw)
     except StopIteration:
@@ -157,13 +183,44 @@ def read_rows(bucket: str, key: str) -> Iterator[dict[str, Any]]:
         yield {names[i]: row[i] for i in range(min(len(names), len(row)))}
 
 
+def workbook_rows(body: bytes) -> Iterator[tuple[Any, ...]]:
+    """The first sheet's rows. Read-only so a large workbook stays cheap."""
+    sheet = openpyxl.load_workbook(io.BytesIO(body), read_only=True, data_only=True).worksheets[0]
+    return sheet.iter_rows(values_only=True)
+
+
+def csv_rows(body: bytes) -> Iterator[list[str]]:
+    """The CSV's rows, read by the `csv` module because most essays hold line breaks."""
+    # newline="" so the reader sees the line endings itself — nothing else gets a chance to
+    # translate a break inside a quoted essay into the end of a record.
+    return iter(csv.reader(io.StringIO(decode(body), newline="")))
+
+
+def decode(body: bytes) -> str:
+    """CSV text, UTF-8 if it is UTF-8 and Windows-1252 if it is not."""
+    try:
+        return body.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        # Scholarship Manager writes curly apostrophes as cp1252, which strict UTF-8 refuses —
+        # one byte would fail the whole intake. cp1252 is second, not first, because it maps
+        # every byte and so can never raise: a real UTF-8 export read this way would come
+        # through as mojibake with nothing to say it had.
+        return body.decode("cp1252")
+
+
 def collect(
     rows: Iterator[dict[str, Any]], *, year: str, source_file: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Turn rows into applications. The first of a duplicate pair is kept and both are named."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """Turn rows into applications.
+
+    The first of a duplicate pair is kept and both are named. The fourth return value maps each
+    scholarship slug that produced an application to the name the export spelled it with, which
+    is the only place that name survives — nothing derives it back from the slug.
+    """
     applications: dict[tuple[str, str], dict[str, Any]] = {}
     skipped: list[dict[str, Any]] = []
     duplicates: list[dict[str, Any]] = []
+    names: dict[str, str] = {}
 
     for offset, row in enumerate(rows):
         number = offset + 2  # the header is row 1
@@ -189,6 +246,7 @@ def collect(
             )
             continue
 
+        names[scholarship] = str(fields["availability"])
         applications[identity] = {
             "pk": cohort_pk(scholarship, year),
             "sk": application_sk(student),
@@ -203,7 +261,25 @@ def collect(
             "source": {"file": source_file, "row_number": number},
         }
 
-    return list(applications.values()), skipped, duplicates
+    return list(applications.values()), skipped, duplicates, names
+
+
+def remember_cohort(scholarship: str, year: str, display_name: str) -> None:
+    """Put this cohort in the partition a screen lists, so nobody has to guess its slug."""
+    table().update_item(
+        Key={"pk": COHORTS_PK, "sk": cohort_index_sk(scholarship, year)},
+        UpdateExpression=(
+            "SET scholarship = :scholarship, #year = :year, display_name = :name,"
+            " last_ingest_at = :at"
+        ),
+        ExpressionAttributeNames={"#year": "year"},
+        ExpressionAttributeValues={
+            ":scholarship": scholarship,
+            ":year": year,
+            ":name": display_name,
+            ":at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+    )
 
 
 def qa_pairs(row: dict[str, Any]) -> list[dict[str, str]]:
@@ -274,16 +350,45 @@ def store(application: dict[str, Any]) -> str:
 
     table().update_item(
         Key={"pk": application["pk"], "sk": application["sk"]},
-        # The score item stays readable. What goes is the ranking entry and the stored
-        # version, so a total made from older text is not compared against the cohort.
+        # The score item stays readable. What goes is the copy of the newest total, so a number
+        # made from older text is not shown as this application's score. Its stored totals go
+        # too, in `drop_totals`, because those are the rows a ranking reads.
         UpdateExpression=(
-            "SET " + ", ".join(sets) + " REMOVE rank_pk, rubric_version, claimed_by,"
-            " claimed_until, failure, last_error"
+            "SET " + ", ".join(sets) + " REMOVE rubric_version, model_id, total_score,"
+            " category_scores, latest_scored_at, claimed_by, claimed_until, failure, last_error"
         ),
         ExpressionAttributeNames={"#status": "status", "#year": "year", "#source": "source"},
         ExpressionAttributeValues=to_dynamo(values),
     )
     return "changed" if existing else "new"
+
+
+def drop_totals(scholarship: str, year: str, students: set[str]) -> int:
+    """Delete every stored total of applications whose content changed. Returns how many went.
+
+    A total is a number made from text that is no longer there, in every set that holds one, so
+    none of them may stay in a ranking. The score items stay: each is the record of an attempt
+    against the text as it was. One keys-only read of the cohort's totals covers the whole file.
+    """
+    gone = 0
+    start_key: dict[str, Any] | None = None
+    while True:
+        request: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(cohort_pk(scholarship, year))
+            & Key("sk").begins_with(total_prefix()),
+            "ProjectionExpression": "sk",
+        }
+        if start_key:
+            request["ExclusiveStartKey"] = start_key
+        page = table().query(**request)
+        for item in page.get("Items", []):
+            sk = str(item["sk"])
+            if set_of(sk)[2] in students:
+                table().delete_item(Key={"pk": cohort_pk(scholarship, year), "sk": sk})
+                gone += 1
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            return gone
 
 
 def content_hash(application: dict[str, Any]) -> str:

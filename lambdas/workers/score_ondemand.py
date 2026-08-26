@@ -1,8 +1,8 @@
 """On-demand scoring: one application per model call.
 
-The run is scoped to a scholarship, a year, and a rubric version. Each item is claimed before
-it is scored, so two runs over the same cohort cannot both score the same application, and the
-worker stops claiming while it still has time to finish what it holds.
+The run is scoped to a scholarship, a year, a rubric version, and a model. Each item is claimed
+before it is scored, so two runs over the same cohort cannot both score the same application, and
+the worker stops claiming while it still has time to finish what it holds.
 
 A reply that fails the check is retried once with what was wrong included, because a second
 identical call at temperature 0 gives the same bad reply. A throttle is not a failure: the
@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 from shared.claims import ONDEMAND_CLAIM, claim, mark_failed, release
-from shared.model import Transient, converse
+from shared.model import Transient, checked_model, converse
 from shared.prompt import applicant_text, static_prefix
 from shared.reply import ReplyError, check_reply
 from shared.scores import StaleClaim, write_score
@@ -25,8 +24,6 @@ from shared.work import claimable, rubric_version_item
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-MODEL_ID = os.environ["MODEL_ID"]
 
 WORKER = "score-ondemand"
 
@@ -42,6 +39,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     scholarship = event["scholarship"]
     year = event["year"]
     version = event["rubric_version"]
+    model = checked_model(event.get("model_id"))
     run_id = f"{WORKER}#{context.aws_request_id}"
 
     rubric = rubric_version_item(scholarship, version)
@@ -52,6 +50,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         scholarship=scholarship,
         year=year,
         rubric_version=version,
+        model_id=model,
         scope=event.get("scope"),
         limit=event.get("limit"),
     )
@@ -68,7 +67,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         if not claim(
             pk=item["pk"], sk=item["sk"], claimed_by=run_id, rubric_version=version,
-            holds=ONDEMAND_CLAIM,
+            model_id=model, holds=ONDEMAND_CLAIM,
         ):
             counts["claimed_elsewhere"] += 1
             continue
@@ -78,6 +77,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             criteria=criteria,
             prefix=prefix,
             version=version,
+            model=model,
             run_id=run_id,
         )
         counts[outcome] += 1
@@ -90,6 +90,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "scholarship": scholarship,
         "year": year,
         "rubric_version": version,
+        "model_id": model,
         "found": len(items),
         **counts,
         "not_reached": len(items) - reached,
@@ -114,6 +115,7 @@ def score_one(
     criteria: list[dict[str, Any]],
     prefix: str,
     version: str,
+    model: str,
     run_id: str,
 ) -> tuple[str, str]:
     """One claimed application. Returns the outcome and, when it is not `scored`, why."""
@@ -122,7 +124,7 @@ def score_one(
 
     for attempt in range(1, MODEL_TRIES + 1):
         try:
-            answer = converse(model_id=MODEL_ID, prompt=prompt + complaint)
+            answer = converse(model_id=model, prompt=prompt + complaint)
         except Transient as error:
             release(pk=item["pk"], sk=item["sk"], claimed_by=run_id, reason=str(error))
             return "released", str(error)
@@ -147,7 +149,7 @@ def score_one(
                 reply=checked,
                 criteria=criteria,
                 rubric_version=version,
-                model_id=MODEL_ID,
+                model_id=model,
                 worker=WORKER,
                 input_tokens=answer.input_tokens,
                 output_tokens=answer.output_tokens,

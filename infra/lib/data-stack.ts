@@ -6,7 +6,7 @@ import type { EnvStackProps } from './env';
 
 /** The bucket's prefixes. One definition, so a handler and a policy cannot disagree. */
 export const BUCKET_PREFIXES = {
-  /** Workbooks a person uploads from the dashboard. Ingest reads them. */
+  /** Exports a person uploads from the dashboard. Ingest reads them. */
   uploads: 'uploads/',
   /** Bedrock batch job input and output. Only the batch worker touches it. */
   batch: 'batch/',
