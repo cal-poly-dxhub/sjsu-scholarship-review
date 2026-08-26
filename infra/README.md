@@ -44,11 +44,27 @@ name that has to be unique, so two environments can share an account.
 
 ## Deploy order
 
-`DataStack`, then `EdgeStack`. Data first because everything else references it.
-`ComputeStack` is empty until phase 2.
+`DataStack`, then `EdgeStack`, then `ComputeStack`. Data first because everything else
+references it.
 
-`http://localhost:5173` is a callback alongside the CloudFront domain, so the Vite dev
+`http://localhost:3000` is a callback alongside the CloudFront domain, so the Vite dev
 server signs in against the same pool.
+
+## Publishing the app
+
+`EdgeStack` uploads `apps/web/dist` to the site bucket and invalidates CloudFront, so a
+deploy ships the app the way it ships the Lambdas. It does not run the build. The bundle
+carries the user pool ids, which come out of this same stack, so a new environment goes:
+
+```bash
+pnpm --filter @sjsu/infra exec cdk deploy dev-EdgeStack   # makes the pool, no site yet
+# copy UserPoolId, UserPoolClientId, SignInDomain into apps/web/.env.local
+pnpm --filter @sjsu/web build
+pnpm --filter @sjsu/infra exec cdk deploy dev-EdgeStack   # publishes the build
+```
+
+After that a deploy publishes whatever the last build wrote. With no `dist` at all — a
+fresh clone — the deploy warns and leaves the bucket alone rather than failing.
 
 ## Who can sign in
 
