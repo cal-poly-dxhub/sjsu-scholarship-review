@@ -38,7 +38,7 @@ def test_the_prompt_and_evidence_lines_are_that_criterion_s_guidance(rubric_text
 
 
 def test_both_banner_blocks_stay_in_the_preamble(rubric_text: str) -> None:
-    """Drop the preamble and the prompt stops asking for half points, which moves scores."""
+    """The banners carry the scoring guidance, and the parsed preamble is what proves they survived."""
     preamble = parse_rubric(rubric_text).preamble
 
     banners = [line for line in preamble.splitlines() if set(line.strip()) == {"="}]

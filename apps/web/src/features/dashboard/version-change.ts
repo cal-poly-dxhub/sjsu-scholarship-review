@@ -3,50 +3,32 @@
  * cohort can be moved by arithmetic or has to be scored again.
  *
  * The same comparison runs in `lambdas/shared/versions.py`, which is what actually decides. This
- * copy is only here so the counts beside the buttons say the truth before anything is pressed.
+ * copy is only here so the counts beside the buttons say the truth before anything is pressed —
+ * so it has to compare the same two things: the file the model reads, and the ids, names, and
+ * maxima the output contract carries. Never the file name: a weights-only republish is the same
+ * text under a new name.
  */
-
-export interface Level {
-  value: number;
-  description: string;
-}
 
 export interface Criterion {
   id: string;
   name: string;
   max: number;
-  weight: number;
-  guidance: string;
-  levels: Level[];
 }
 
 export interface RubricVersion {
   version: string;
   criteria: Criterion[];
-  preamble: string;
-  source_file: string;
-  published_at: string;
-  published_by: string;
+  source_text: string;
 }
 
-/** Everything in a version the model saw. Weights are left out — they are arithmetic. */
-function promptShape(version: RubricVersion): string {
-  return JSON.stringify([
-    version.preamble ?? "",
-    version.criteria.map((criterion) => [
-      criterion.id,
-      criterion.name,
-      criterion.max,
-      criterion.guidance ?? "",
-      (criterion.levels ?? []).map((level) => [level.value, level.description]),
-    ]),
-  ]);
-}
-
-/**
- * True when the two versions differ in weights alone. Guidance and preamble count as a criteria
- * change: the stored scores answer the text the model was given.
- */
+/** True when the two versions differ in weights alone, so a total can be recomputed. */
 export function weightsOnlyChange(stored: RubricVersion, target: RubricVersion): boolean {
-  return promptShape(stored) === promptShape(target);
+  return shape(stored) === shape(target);
+}
+
+function shape(version: RubricVersion): string {
+  return JSON.stringify([
+    version.source_text ?? "",
+    version.criteria.map((criterion) => [criterion.id, criterion.name, criterion.max]),
+  ]);
 }

@@ -15,7 +15,7 @@ from botocore.exceptions import ClientError
 from shared.http import BadRequest, body_of, caller_email, reply
 from shared.rubric import Criterion, RubricError, parse_rubric, validate_weights
 from shared.table import rubric_pk, rubric_sk, table, to_dynamo
-from shared.versions import next_version
+from shared.versions import newest_first, next_version
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -37,6 +37,19 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
             raise BadRequest("'weights' is missing, or is not an object of criterion id to weight")
     except BadRequest as error:
         return reply(400, {"message": str(error)})
+
+    taken = _version_with_file_name(scholarship, source_file)
+    if taken:
+        log.info("refused a rubric for %s: '%s' is already %s", scholarship, source_file, taken)
+        return reply(
+            422,
+            {
+                "message": (
+                    f"'{source_file}' is the file {taken} was published from. "
+                    "Give this file a name of its own so the two versions can be told apart."
+                )
+            },
+        )
 
     try:
         parsed = parse_rubric(source_text)
@@ -90,6 +103,18 @@ def _required(body: dict[str, Any], name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BadRequest(f"'{name}' is missing or empty")
     return value
+
+
+def _version_with_file_name(scholarship: str, source_file: str) -> str | None:
+    """The version already published from this file name, if there is one.
+
+    A unique name is what lets a person tell two versions apart on screen, now that nothing else
+    about them is visible. It is never what decides a recompute — that compares the contents.
+    """
+    for item in newest_first(scholarship, projection="sk, source_file"):
+        if item.get("source_file") == source_file:
+            return item["sk"].removeprefix("V#")
+    return None
 
 
 def _criterion_item(criterion: Criterion, weight: float) -> dict[str, Any]:

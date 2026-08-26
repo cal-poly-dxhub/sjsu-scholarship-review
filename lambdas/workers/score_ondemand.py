@@ -18,7 +18,7 @@ from typing import Any
 
 from shared.claims import ONDEMAND_CLAIM, claim, mark_failed, release
 from shared.model import Transient, converse
-from shared.prompt import applicant_text, static_prefix
+from shared.prompt import applicant_text, system_blocks
 from shared.reply import ReplyError, check_reply
 from shared.scores import StaleClaim, write_score
 from shared.work import claimable, rubric_version_item
@@ -46,7 +46,9 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     rubric = rubric_version_item(scholarship, version)
     criteria = rubric["criteria"]
-    prefix = static_prefix(rubric)
+    # Built before anything is claimed: a version with no rubric file stops the run here
+    # rather than leaving items claimed for a call that cannot be made.
+    system = system_blocks(rubric)
 
     items = claimable(
         scholarship=scholarship,
@@ -76,7 +78,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         outcome, reason = score_one(
             item=item,
             criteria=criteria,
-            prefix=prefix,
+            system=system,
             version=version,
             run_id=run_id,
         )
@@ -112,17 +114,19 @@ def score_one(
     *,
     item: dict[str, Any],
     criteria: list[dict[str, Any]],
-    prefix: str,
+    system: list[dict[str, str]],
     version: str,
     run_id: str,
 ) -> tuple[str, str]:
     """One claimed application. Returns the outcome and, when it is not `scored`, why."""
-    prompt = f"{prefix}\n\nApplication:\n{applicant_text(item)}"
+    application = applicant_text(item)
     complaint = ""
 
     for attempt in range(1, MODEL_TRIES + 1):
         try:
-            answer = converse(model_id=MODEL_ID, prompt=prompt + complaint)
+            answer = converse(
+                model_id=MODEL_ID, system=system, user_text=application + complaint
+            )
         except Transient as error:
             release(pk=item["pk"], sk=item["sk"], claimed_by=run_id, reason=str(error))
             return "released", str(error)
@@ -132,10 +136,11 @@ def score_one(
         except ReplyError as error:
             if attempt < MODEL_TRIES:
                 # Telling the model what was wrong is the only thing that makes a second call
-                # worth making — temperature 0 would repeat the first reply exactly.
+                # worth making — temperature 0 would repeat the first reply exactly. It goes on
+                # the user part so the two system parts stay byte-identical between the calls.
                 complaint = (
                     f"\n\nYour previous reply was rejected: {error}."
-                    " Return one JSON object in the shape described above and nothing else."
+                    " Return one JSON object in the shape you were given and nothing else."
                 )
                 continue
             mark_failed(pk=item["pk"], sk=item["sk"], claimed_by=run_id, reason=str(error))

@@ -1,9 +1,10 @@
 """Checking a model reply, and working out the total from it.
 
 A reply is accepted only if it carries every criterion the rubric names, with ids that
-match and every score a whole or half point inside its own maximum. Anything else is a
-failure: there is no partial parse, no salvage, and no repair step. A repaired reply is a
-score the model did not give.
+match and every score inside its own maximum. Nothing is said here about how fine a score
+may be — that is the rubric file's business. Anything else is a failure: there is no
+partial parse, no salvage, and no repair step. A repaired reply is a score the model did
+not give.
 """
 
 from __future__ import annotations
@@ -143,10 +144,8 @@ def _checked_score(value: Any, criterion_id: str, maximum: int) -> float:
     score = float(value)
     if score < 0 or score > maximum:
         raise ReplyError(f"the score for {criterion_id} is {_plain(score)}, outside 0-{maximum}")
-    # Half points are the step the system allows. Rounding a finer value here would be the
-    # check inventing a score, and 3.7 read as 3.5 moves a total by up to 5 out of 100.
-    if score * 2 != int(score * 2):
-        raise ReplyError(f"the score for {criterion_id} is {_plain(score)}, finer than a half point")
+    # How fine a score may be is the rubric file's business, and the file is sent to the model
+    # whole. A step enforced here could only disagree with it, so 3.7 is stored as 3.7.
     return score
 
 

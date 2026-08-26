@@ -46,20 +46,16 @@ def newest_first(scholarship: str, projection: str | None = None) -> list[dict[s
 
 
 def prompt_shape(version: dict[str, Any]) -> tuple[Any, ...]:
-    """Everything in a version that the model saw. Weights are not in it — they are arithmetic."""
+    """Everything in a version that the model saw. Weights are not in it — they are arithmetic.
+
+    The rubric file is sent whole, so it stands for the preamble, the guidance, and the level
+    descriptions: a change to any of them is a change to the file. What the file does not carry
+    is the ids and maxima, which reach the model through the output contract instead.
+    """
     return (
-        str(version.get("preamble", "")),
+        str(version.get("source_text", "")),
         tuple(
-            (
-                str(criterion["id"]),
-                str(criterion["name"]),
-                int(criterion["max"]),
-                str(criterion.get("guidance", "")),
-                tuple(
-                    (str(level["value"]), str(level["description"]))
-                    for level in criterion.get("levels", [])
-                ),
-            )
+            (str(criterion["id"]), str(criterion["name"]), int(criterion["max"]))
             for criterion in version.get("criteria", [])
         ),
     )

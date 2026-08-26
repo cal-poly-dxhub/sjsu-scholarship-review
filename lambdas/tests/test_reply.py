@@ -95,6 +95,7 @@ def test_a_fenced_reply_is_read_and_a_wrong_one_inside_a_fence_still_fails() -> 
         ([("grit", 1)], "missing clarity"),
         ([("grit", 1), ("clarity", 4), ("polish", 3)], "'polish' is not a criterion"),
         ([("grit", 1), ("clarity", 6)], "outside 0-5"),
+        ([("grit", -0.5), ("clarity", 4)], "outside 0-2"),
         ([("grit", 1), ("clarity", 4), ("clarity", 5)], "scored twice"),
     ],
 )
@@ -110,16 +111,20 @@ def test_a_missing_summary_fails() -> None:
         check_reply(reply([("grit", 1), ("clarity", 4)], summary="  "), FIXTURE_CRITERIA)
 
 
-@pytest.mark.parametrize("score", [3.5, 0.5, 4.0])
-def test_whole_and_half_points_are_accepted(score: float) -> None:
+@pytest.mark.parametrize("score", [0.5, 3.5, 3.7, 4.0, 5])
+def test_a_score_is_stored_as_the_model_gave_it(score: float) -> None:
+    """Any number in the range is a score. Reading 3.7 as 3.5 or 4 would move a total by 5."""
     checked = check_reply(reply([("grit", 1), ("clarity", score)]), FIXTURE_CRITERIA)
     assert checked.scores[1].score == score
 
 
-def test_a_finer_score_fails_and_is_not_rounded() -> None:
-    """Reading 3.7 as 3.5 or 4 moves a total by up to 5 out of 100."""
-    with pytest.raises(ReplyError, match="finer than a half point"):
-        check_reply(reply([("grit", 1), ("clarity", 3.7)]), FIXTURE_CRITERIA)
+def test_a_whole_number_and_the_same_value_with_a_point_are_one_score() -> None:
+    """3 and 3.0 come off the wire differently and have to end up as the same score."""
+    plain = check_reply(reply([("grit", 1), ("clarity", 3)]), FIXTURE_CRITERIA).scores
+    pointed = check_reply(reply([("grit", 1), ("clarity", 3.0)]), FIXTURE_CRITERIA).scores
+
+    assert plain[1].score == pointed[1].score
+    assert weighted_total(plain, FIXTURE_CRITERIA) == weighted_total(pointed, FIXTURE_CRITERIA)
 
 
 def test_the_total_is_each_score_over_its_own_maximum_times_its_weight(

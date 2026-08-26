@@ -23,7 +23,7 @@ from botocore.exceptions import ClientError
 
 from shared.claims import BATCH_CLAIM, claim, mark_failed, release
 from shared.model import Answer, text_of
-from shared.prompt import applicant_text, static_prefix
+from shared.prompt import applicant_text, system_blocks
 from shared.quota import minimum_batch_records
 from shared.reply import ReplyError, check_reply
 from shared.scores import StaleClaim, write_score
@@ -80,7 +80,9 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
     version = event["rubric_version"]
 
     rubric = rubric_version_item(scholarship, version)
-    prefix = static_prefix(rubric)
+    # Built before anything is claimed: a version with no rubric file stops the run here
+    # rather than leaving items claimed for a job that cannot be written.
+    system = system_blocks(rubric)
     job = job_name(scholarship, year, version, context.aws_request_id)
 
     items = claimable(
@@ -122,7 +124,7 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
     boto3.client("s3").put_object(
         Bucket=BUCKET,
         Key=key,
-        Body="\n".join(json.dumps(record(item, prefix)) for item in claimed).encode("utf-8"),
+        Body="\n".join(json.dumps(record(item, system)) for item in claimed).encode("utf-8"),
     )
 
     try:
@@ -164,17 +166,13 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
     return report
 
 
-def record(item: dict[str, Any], prefix: str) -> dict[str, Any]:
+def record(item: dict[str, Any], system: list[dict[str, str]]) -> dict[str, Any]:
     """One line of the job's input. The record id is the student, which is how it is matched back."""
     return {
         "recordId": item["sk"].removeprefix("APP#"),
         "modelInput": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"text": f"{prefix}\n\nApplication:\n{applicant_text(item)}"}],
-                }
-            ],
+            "system": system,
+            "messages": [{"role": "user", "content": [{"text": applicant_text(item)}]}],
             "inferenceConfig": {"temperature": 0, "maxTokens": MAX_TOKENS},
         },
     }
