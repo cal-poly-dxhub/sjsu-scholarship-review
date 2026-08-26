@@ -15,8 +15,11 @@ import { Checkbox } from "@/sjsu/components/ui/checkbox";
 import { EmptyState } from "@/sjsu/components/empty-state";
 import { TableEmptyOverlay } from "@/sjsu/components/table-empty-overlay";
 import { useTableSort } from "@/sjsu/lib/use-table-sort";
+import { DEFAULT_MODEL_ID, SCORING_MODELS } from "@/lib/models";
 import { cohortExport, download, fetchReasoning, reasoningBatches } from "./export";
 import { EMPTY_FILTERS, isFiltering, listRows } from "./list-rows";
+import { STATE_LABELS, hasCurrentScore, scoreState } from "./score-state";
+import { modelWords, setWords, setsPresent } from "./sets";
 
 /** One score on the application's own copy of the numbers. The reasoning lives on the score item. */
 interface CriterionScore {
@@ -36,6 +39,7 @@ interface Application {
   category_scores: Record<string, CriterionScore> | null;
   total_score: number | null;
   rubric_version: string | null;
+  model_id: string | null;
   latest_scored_at: string | null;
   claimed_until: string | null;
   failure: string | null;
@@ -46,6 +50,8 @@ interface CohortResponse {
   total: number;
   states: { scored: number; unscored: number; running: number; failed: number };
   scored_by_rubric_version: Record<string, number>;
+  /** One count per set, keyed `<rubric version>#<model>`. Off the totals, not the applications. */
+  scored_by_set: Record<string, number>;
   searchable: string;
 }
 
@@ -92,6 +98,7 @@ export function ApplicationsList({
   // Server pages come back as opaque markers. Index 0 is the first page, so it has none.
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [pickedVersion, setPickedVersion] = useState<string | null>(null);
+  const [pickedModel, setPickedModel] = useState<string | null>(null);
   const [withReasoning, setWithReasoning] = useState(false);
   const [exporting, setExporting] = useState<{ done: number; total: number } | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -105,7 +112,9 @@ export function ApplicationsList({
   const activeFilters = Object.values(filters).filter(Boolean).length;
   const filtering = isFiltering(search, filters);
 
-  const cohortQuery = useQuery({
+  // What the cohort holds, before any set is picked: the states and the count per set. The same
+  // key the dashboard's coverage panel reads under, so the two cannot disagree.
+  const countsQuery = useQuery({
     queryKey: ["cohort", scholarship, year],
     queryFn: () =>
       api<CohortResponse>(
@@ -119,16 +128,50 @@ export function ApplicationsList({
       api<VersionsResponse>(`/rubric-versions?scholarship=${encodeURIComponent(scholarship)}`),
   });
 
-  const scoredByVersion = cohortQuery.data?.scored_by_rubric_version ?? {};
   const versions = versionsQuery.data?.versions ?? [];
-  // The version the shown totals were made under: the newest one this cohort actually has
-  // totals for, so the criterion columns match the numbers beside them.
+  const sets = setsPresent(countsQuery.data?.scored_by_set ?? {});
+  const totalsAt = (name: string) =>
+    sets.filter((set) => set.rubric_version === name).reduce((sum, set) => sum + set.count, 0);
+
+  // The set the screen is showing. The version is the newest one this cohort has totals under, so
+  // the criterion columns match the numbers beside them; the model is the one most of those totals
+  // were made by. Together they decide the rows, the columns, and the ranking read.
   const version =
-    pickedVersion ?? versions.find((v) => scoredByVersion[v.version])?.version ?? null;
+    pickedVersion ?? versions.find((v) => totalsAt(v.version))?.version ?? versions[0]?.version
+    ?? null;
+  const atVersion = sets.filter((set) => set.rubric_version === version);
+  const model = pickedModel ?? atVersion[0]?.model_id ?? DEFAULT_MODEL_ID;
   const criteria = versions.find((v) => v.version === version)?.criteria ?? [];
 
+  // Every model this version has totals from, plus the three a run can be started on, so the
+  // picker is never empty and a model with nothing yet is offered rather than missing.
+  const modelOptions: [string, number][] = [
+    ...atVersion.map((set): [string, number] => [set.model_id, set.count]),
+    ...SCORING_MODELS.filter((choice) => !atVersion.some((set) => set.model_id === choice.id)).map(
+      (choice): [string, number] => [choice.id, 0],
+    ),
+  ];
+
+  const shownSet = atVersion.find((set) => set.model_id === model);
+  const otherSets = sets.filter(
+    (set) => set.rubric_version !== version || set.model_id !== model,
+  );
+
+  // The same cohort read again, this time for one set: every row carries that set's total or none.
+  // Without it a row would show the item's copy of its newest total, whichever model made it.
+  const cohortQuery = useQuery({
+    queryKey: ["cohort", scholarship, year, "set", version, model],
+    enabled: version !== null,
+    queryFn: () =>
+      api<CohortResponse>(
+        `/cohort?scholarship=${encodeURIComponent(scholarship)}&year=${encodeURIComponent(year)}` +
+          `&rubric_version=${encodeURIComponent(version ?? "")}` +
+          `&model_id=${encodeURIComponent(model)}`,
+      ),
+  });
+
   const rankedQuery = useQuery({
-    queryKey: ["ranked", scholarship, year, version, direction, page],
+    queryKey: ["ranked", scholarship, year, version, model, direction, page],
     enabled: ranking && !filtering && version !== null,
     queryFn: () => {
       const marker = cursors[page];
@@ -136,11 +179,17 @@ export function ApplicationsList({
         `/ranked?scholarship=${encodeURIComponent(scholarship)}` +
           `&year=${encodeURIComponent(year)}` +
           `&rubric_version=${encodeURIComponent(version ?? "")}` +
+          `&model_id=${encodeURIComponent(model)}` +
           `&direction=${direction}&limit=${PAGE_SIZE}` +
           (marker ? `&cursor=${encodeURIComponent(marker)}` : ""),
       );
     },
   });
+
+  // With no rubric version published there is no set to read, and nothing is scored either, so
+  // the first read's items are the list.
+  const applications =
+    (version === null ? countsQuery.data?.applications : cohortQuery.data?.applications) ?? [];
 
   const { rows: matched, rankedRead } = useMemo(
     () =>
@@ -148,23 +197,23 @@ export function ApplicationsList({
         ranking,
         search,
         filters,
-        cohort: cohortQuery.data?.applications ?? [],
+        cohort: applications,
         ranked: rankedQuery.data?.applications ?? [],
       }),
-    [ranking, search, filters, cohortQuery.data, rankedQuery.data],
+    [ranking, search, filters, applications, rankedQuery.data],
   );
 
   // Ranked pages come off the server already sized; a cohort listing is cut here.
   const shown = rankedRead ? matched : matched.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const firstOnPage = page * PAGE_SIZE;
 
-  const isLoading = cohortQuery.isLoading || (rankedRead && rankedQuery.isLoading);
-  const isError = cohortQuery.isError || (rankedRead && rankedQuery.isError);
+  const isLoading =
+    countsQuery.isLoading || cohortQuery.isLoading || (rankedRead && rankedQuery.isLoading);
+  const isError = countsQuery.isError || cohortQuery.isError || (rankedRead && rankedQuery.isError);
 
-  const states = cohortQuery.data?.states;
-  const otherVersions = Object.entries(scoredByVersion)
-    .filter(([name]) => name !== version)
-    .reduce((sum, [, count]) => sum + count, 0);
+  const states = countsQuery.data?.states;
+  const shownTotals = shownSet?.count ?? 0;
+  const inOtherSets = otherSets.reduce((sum, set) => sum + set.count, 0);
 
   const resetPaging = () => {
     setPage(0);
@@ -173,15 +222,14 @@ export function ApplicationsList({
 
   // The rows the screen is showing, in that order — a person exporting a filtered list means
   // the list they filtered. What the file leaves out, it says: the coverage counts travel with it.
-  const cohort = cohortQuery.data?.applications ?? [];
   const toRead = reasoningBatches(matched).reduce((sum, batch) => sum + batch.length, 0);
   const coverage = {
-    cohort_total: cohortQuery.data?.total ?? cohort.length,
-    ranked: scoredByVersion[version ?? ""] ?? 0,
+    cohort_total: countsQuery.data?.total ?? applications.length,
+    ranked: shownTotals,
     unscored: states?.unscored ?? 0,
     running: states?.running ?? 0,
     failed: states?.failed ?? 0,
-    scored_under_an_older_version: otherVersions,
+    in_other_sets: inOtherSets,
   };
 
   const exportCohort = async () => {
@@ -199,6 +247,8 @@ export function ApplicationsList({
           scholarship,
           year,
           rubricVersion: version,
+          modelId: model,
+          otherSets,
           criteria,
           applications: matched,
           coverage,
@@ -228,7 +278,7 @@ export function ApplicationsList({
             {scholarship} · {year}
           </h1>
           <p className="text-sm text-muted-foreground">
-            {matched.length} of {cohortQuery.data?.total ?? 0} applications
+            {matched.length} of {countsQuery.data?.total ?? 0} applications
             {rankedRead ? `, ${direction} scores first` : ", in the order they are stored"}
           </p>
         </div>
@@ -244,14 +294,38 @@ export function ApplicationsList({
       {/* What a ranking leaves out. None of these is in the index, so none is ranked as zero. */}
       {states && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <Badge variant="secondary">{scoredByVersion[version ?? ""] ?? 0} ranked</Badge>
+          <Badge variant="secondary">{shownTotals} ranked</Badge>
           <Badge variant="outline">{states.unscored} unscored</Badge>
           <Badge variant="outline">{states.running} running</Badge>
           <Badge variant={states.failed > 0 ? "warning" : "outline"}>{states.failed} failed</Badge>
-          <Badge variant="outline">{otherVersions} scored under an older version</Badge>
+          <Badge variant="outline">{inOtherSets} totals in other sets</Badge>
           <span>Nothing here is signed off — reviewer sign-off is not built.</span>
         </div>
       )}
+
+      {/* The set on screen, and every other set the cohort holds. A set that is not shown is named
+          and counted rather than hidden, because its totals are not in these rows at all. */}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <Badge variant="secondary">
+          showing {setWords(version, model)}: {shownTotals} totals
+        </Badge>
+        {otherSets.length > 0 && (
+          <Badge variant="warning">
+            {otherSets.length + 1} sets in this cohort
+          </Badge>
+        )}
+        {otherSets.map((set) => (
+          <Badge key={`${set.rubric_version}#${set.model_id}`} variant="outline">
+            {setWords(set.rubric_version, set.model_id)}: {set.count}
+          </Badge>
+        ))}
+        {otherSets.length > 0 && (
+          <span>
+            A total is comparable only with one made at the same rubric version by the same model.
+            Pick a set above to see its numbers.
+          </span>
+        )}
+      </div>
 
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex-1 min-w-64">
@@ -272,12 +346,34 @@ export function ApplicationsList({
               value={version ?? ""}
               onChange={(event) => {
                 setPickedVersion(event.target.value);
+                // The model that made most of one version's totals made none of another's, so the
+                // pair is picked afresh rather than carried across.
+                setPickedModel(null);
                 resetPaging();
               }}
             >
               {versions.map((v) => (
                 <NativeSelectOption key={v.version} value={v.version}>
-                  {v.version} · {scoredByVersion[v.version] ?? 0} scored
+                  {v.version} · {totalsAt(v.version)} totals
+                </NativeSelectOption>
+              ))}
+            </NativeSelect>
+          </div>
+        )}
+        {versions.length > 0 && (
+          <div>
+            <Label className="text-xs text-muted-foreground">Model</Label>
+            <NativeSelect
+              className="mt-1 w-full"
+              value={model}
+              onChange={(event) => {
+                setPickedModel(event.target.value);
+                resetPaging();
+              }}
+            >
+              {modelOptions.map(([id, count]) => (
+                <NativeSelectOption key={id} value={id}>
+                  {modelWords(id)} · {count} totals
                 </NativeSelectOption>
               ))}
             </NativeSelect>
@@ -427,39 +523,53 @@ export function ApplicationsList({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {shown.map((app, index) => (
-              <TableRow
-                key={app.sk}
-                className="cursor-pointer"
-                onClick={() => onSelectApp(app.student_uuid)}
-              >
-                <TableCell className="text-muted-foreground">{firstOnPage + index + 1}</TableCell>
-                <TableCell className="font-mono text-xs">{app.student_uuid.slice(0, 8)}…</TableCell>
-                <TableCell className="truncate">{app.academic_program ?? "—"}</TableCell>
-                <TableCell className="truncate">{app.academic_level ?? "—"}</TableCell>
-                <TableCell className="truncate">{app.major ?? "—"}</TableCell>
-                <TableCell className="tabular-nums">{app.gpa ?? "—"}</TableCell>
-                <TableCell className="tabular-nums font-medium">
-                  {app.total_score ?? "—"}
-                  {app.total_score !== null && (
-                    <Badge variant="outline" className="ml-2">
-                      unreviewed
-                    </Badge>
-                  )}
-                </TableCell>
-                {criteria.map((criterion) => {
-                  const score = app.category_scores?.[criterion.id];
-                  return (
-                    <TableCell key={criterion.id} className="tabular-nums">
-                      {score ? `${score.score}/${score.max}` : "—"}
-                    </TableCell>
-                  );
-                })}
-                <TableCell>
-                  <StateBadge app={app} />
-                </TableCell>
-              </TableRow>
-            ))}
+            {shown.map((app, index) => {
+              // Only a current score is shown as a number. A superseded one is behind its state,
+              // and the detail screen is where it can still be read.
+              const current = hasCurrentScore(app);
+              return (
+                <TableRow
+                  key={app.sk}
+                  className="cursor-pointer"
+                  onClick={() => onSelectApp(app.student_uuid)}
+                >
+                  <TableCell className="text-muted-foreground">{firstOnPage + index + 1}</TableCell>
+                  <TableCell className="font-mono text-xs">{app.student_uuid.slice(0, 8)}…</TableCell>
+                  <TableCell className="truncate">{app.academic_program ?? "—"}</TableCell>
+                  <TableCell className="truncate">{app.academic_level ?? "—"}</TableCell>
+                  <TableCell className="truncate">{app.major ?? "—"}</TableCell>
+                  <TableCell className="tabular-nums">{app.gpa ?? "—"}</TableCell>
+                  <TableCell className="tabular-nums font-medium">
+                    {current ? (
+                      <>
+                        {app.total_score}
+                        <Badge variant="outline" className="ml-2">
+                          unreviewed
+                        </Badge>
+                      </>
+                    ) : scoreState(app) === "not_in_set" ? (
+                      // A total this applicant has in another set is not this set's number.
+                      <span className="text-xs font-normal text-muted-foreground">
+                        {STATE_LABELS.not_in_set}
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </TableCell>
+                  {criteria.map((criterion) => {
+                    const score = current ? app.category_scores?.[criterion.id] : undefined;
+                    return (
+                      <TableCell key={criterion.id} className="tabular-nums">
+                        {score ? `${score.score}/${score.max}` : "—"}
+                      </TableCell>
+                    );
+                  })}
+                  <TableCell>
+                    <StateBadge app={app} />
+                  </TableCell>
+                </TableRow>
+              );
+            })}
           </TableBody>
         </Table>
       </EmptyState>
@@ -487,14 +597,19 @@ export function ApplicationsList({
   );
 }
 
+// No version or model badge per row: every row on screen is from the picked set, which the header
+// names. A row with no total in that set says so, because a dash there reads as no score at all.
 function StateBadge({ app }: { app: Application }) {
-  if (app.status === "score_failed") return <Badge variant="warning">failed</Badge>;
-  // An expired claim is work again, whatever the status still says.
-  if (app.status === "processing" && (app.claimed_until ?? "") > new Date().toISOString()) {
-    return <Badge variant="secondary">running</Badge>;
+  const state = scoreState(app);
+  if (state === "scored") {
+    return <Badge variant="secondary">{STATE_LABELS.scored}</Badge>;
   }
-  if (app.total_score === null) return <Badge variant="outline">unscored</Badge>;
-  return <Badge variant="secondary">{app.rubric_version ?? "scored"}</Badge>;
+  if (state === "failed" || state === "needs_rescore") {
+    return <Badge variant="warning">{STATE_LABELS[state]}</Badge>;
+  }
+  return (
+    <Badge variant={state === "running" ? "secondary" : "outline"}>{STATE_LABELS[state]}</Badge>
+  );
 }
 
 function Paging({

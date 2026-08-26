@@ -6,6 +6,7 @@ import {
   type ExportApplication,
   type ScoreItem,
 } from "./export";
+import type { CohortSet } from "./sets";
 
 /**
  * The shape of the file someone downloads. It is the one artifact that leaves the system, so
@@ -40,6 +41,7 @@ function scored(student: string, extra: Partial<ExportApplication> = {}): Export
     gpa: 3.75,
     total_score: 80,
     rubric_version: "v2",
+    model_id: "us.anthropic.claude-sonnet-4-6",
     latest_scored_at: "2026-08-01T00:00:00.000000Z",
     category_scores: { grit: { score: 1, max: 2 }, clarity: { score: 5, max: 5 } },
     failure: null,
@@ -64,6 +66,11 @@ const FAILED = scored("three", {
   failure: "the reply was missing a criterion",
 });
 
+// Ingest kept the total and took the version off, because the answers changed under it.
+const CHANGED = scored("four", { status: "parsed", rubric_version: null });
+
+const RUNNING = scored("five", { status: "processing", claimed_until: "2099-01-01T00:00:00Z" });
+
 const REASONING: Record<string, ScoreItem | null> = {
   one: {
     category_scores: {
@@ -83,17 +90,20 @@ const COVERAGE = {
   unscored: 1,
   running: 0,
   failed: 1,
-  scored_under_an_older_version: 0,
+  in_other_sets: 0,
 };
 
 function build(
   scores?: Record<string, ScoreItem | null>,
   applications: ExportApplication[] = [scored("one"), UNSCORED, FAILED],
+  otherSets: CohortSet[] = [],
 ) {
   return cohortExport({
     scholarship: "sjsu-general",
     year: "2026",
     rubricVersion: "v2",
+    modelId: "us.anthropic.claude-sonnet-4-6",
+    otherSets,
     criteria: CRITERIA,
     applications,
     coverage: COVERAGE,
@@ -129,6 +139,17 @@ describe("cohortExport", () => {
     expect(rowAt(rows, 1).criteria.map((criterion) => criterion.weight)).toEqual([40, 60]);
   });
 
+  it("says a total is not current rather than exporting it as a score", () => {
+    // A row read as 'scored' is a number someone sorts and decides on. These two are not scores:
+    // one was made from answers that have since changed, the other is being replaced right now.
+    const rows = build(undefined, [CHANGED, RUNNING]).applications;
+
+    expect(rows.map((row) => row.state)).toEqual(["needs_rescore", "running"]);
+    // The number stays in the file, because the warning above names it as the previous score.
+    expect(rowAt(rows, 0).total_score).toBe(80);
+    expect(build().warnings.join(" ")).toContain("carries the previous one");
+  });
+
   it("carries reasoning only when it was asked for", () => {
     const without = build();
     expect(without.reasoning_included).toBe(false);
@@ -154,6 +175,31 @@ describe("cohortExport", () => {
     expect(filtered.coverage).toEqual(COVERAGE);
     expect(build().whole_cohort).toBe(true);
     expect(build().warnings).toEqual(EXPORT_WARNINGS);
+  });
+
+  it("is one set, named in the header and on every row", () => {
+    // A file that mixes two models' totals without saying so is a ranking nobody can defend.
+    const file = build();
+
+    expect(file.rubric_version).toBe("v2");
+    expect(file.model_id).toBe("us.anthropic.claude-sonnet-4-6");
+    expect(rowAt(file.applications, 0).model_id).toBe("us.anthropic.claude-sonnet-4-6");
+    expect(file.warnings.join(" ")).toContain("one rubric version scored by one model");
+  });
+
+  it("names the sets it does not hold, with their counts", () => {
+    // Silence here is a reviewer concluding these totals are all the cohort has.
+    const others: CohortSet[] = [
+      { rubric_version: "v2", model_id: "us.anthropic.claude-opus-4-6-v1", count: 12 },
+      { rubric_version: "v1", model_id: "unknown", count: 3 },
+    ];
+    const file = build(undefined, [scored("one"), UNSCORED, FAILED], others);
+
+    expect(file.other_sets).toEqual(others);
+    const said = file.warnings.join(" ");
+    expect(said).toContain("2 other sets");
+    expect(said).toContain("v2 by Opus 4.6 — strongest (12)");
+    expect(said).toContain("v1 by no model recorded (3)");
   });
 
   it("names the fields it left out", () => {

@@ -1,4 +1,6 @@
 import { api } from "@/api";
+import { scoreState } from "./score-state";
+import { modelWords, type CohortSet } from "./sets";
 
 /**
  * Building the export file, in the browser, out of what the screen already fetched. Nothing is
@@ -18,12 +20,14 @@ export interface ExportCriterion {
 export interface ExportApplication {
   student_uuid: string;
   status: string;
+  claimed_until: string | null;
   academic_program: string | null;
   academic_level: string | null;
   major: string | null;
   gpa: string | number | null;
   total_score: number | null;
   rubric_version: string | null;
+  model_id: string | null;
   latest_scored_at: string | null;
   category_scores: Record<string, { score: number; max: number }> | null;
   failure: string | null;
@@ -41,7 +45,8 @@ export interface ScoreItem {
   total_score: number;
   reasoning_summary: string;
   rubric_version: string;
-  model_id: string;
+  // Null on a score written before the model was recorded.
+  model_id: string | null;
 }
 
 // One request per hundred keys, which is what a BatchGetItem takes and what makes progress
@@ -50,8 +55,13 @@ const BATCH_KEYS = 100;
 
 export const EXPORT_WARNINGS = [
   "No score here is signed off — reviewer sign-off is not built.",
-  "Only totals made under the same rubric version are comparable with each other.",
+  "This file is one set: one rubric version scored by one model, named in the header and on every"
+    + " row. A total from another set is not in it.",
+  "A row whose state is 'not_in_set' has no total in this set. It may hold one in another set,"
+    + " which is not the same thing as a score from this model.",
   "Unscored and failed applications are in this file with their state, not as a zero.",
+  "A row whose state is not 'scored' carries no total for this set, or carries the previous one:"
+    + " the answers changed after it was made, or a run is working on it now.",
 ];
 
 // Named rather than only left out, so nobody reading this file mistakes a trimmed row for the
@@ -69,11 +79,13 @@ export const OMITTED_FIELDS = [
 export interface ExportCoverage {
   /** Applications in the cohort, whatever this file holds. */
   cohort_total: number;
+  /** Totals in the set this file is. */
   ranked: number;
   unscored: number;
   running: number;
   failed: number;
-  scored_under_an_older_version: number;
+  /** Totals the cohort holds in sets this file does not cover. */
+  in_other_sets: number;
 }
 
 /** Applications that have a score item to read, in batches of a hundred. */
@@ -123,6 +135,8 @@ export function cohortExport({
   scholarship,
   year,
   rubricVersion,
+  modelId,
+  otherSets,
   criteria,
   applications,
   coverage,
@@ -131,6 +145,10 @@ export function cohortExport({
   scholarship: string;
   year: string;
   rubricVersion: string | null;
+  /** The model whose totals this file holds. With the version, that is the set. */
+  modelId: string | null;
+  /** Every set the cohort holds that this file does not, so nothing is silently left out. */
+  otherSets: CohortSet[];
   criteria: ExportCriterion[];
   /** The rows the screen is showing, in the order it shows them. */
   applications: ExportApplication[];
@@ -140,10 +158,23 @@ export function cohortExport({
   scores?: Record<string, ScoreItem | null>;
 }) {
   const whole = applications.length === coverage.cohort_total;
+  const elsewhere = otherSets.length
+    ? [
+        `This cohort also holds totals in ${otherSets.length} other`
+          + ` ${otherSets.length === 1 ? "set" : "sets"}, none of them in this file: `
+          + otherSets
+              .map((set) => `${set.rubric_version} by ${modelWords(set.model_id)} (${set.count})`)
+              .join(", ")
+          + ".",
+      ]
+    : [];
   return {
     scholarship,
     year,
     rubric_version: rubricVersion,
+    // The other half of the set. Empty means the totals were made before the model was recorded.
+    model_id: modelId,
+    other_sets: otherSets,
     exported_at: new Date().toISOString(),
     // The file is what the screen was showing. Saying so is the difference between a filtered
     // list read as a filtered list and one read as the whole cohort.
@@ -152,13 +183,16 @@ export function cohortExport({
     coverage,
     reviewed: false,
     reasoning_included: scores !== undefined,
-    warnings: whole
-      ? EXPORT_WARNINGS
-      : [
-          `This file holds the ${applications.length} applications the screen was showing, in that`
-            + ` order, out of ${coverage.cohort_total} in the cohort.`,
-          ...EXPORT_WARNINGS,
-        ],
+    warnings: [
+      ...(whole
+        ? []
+        : [
+            `This file holds the ${applications.length} applications the screen was showing, in`
+              + ` that order, out of ${coverage.cohort_total} in the cohort.`,
+          ]),
+      ...EXPORT_WARNINGS,
+      ...elsewhere,
+    ],
     omitted_fields: OMITTED_FIELDS,
     criteria,
     applications: applications.map((app) => row(app, criteria, scores)),
@@ -182,6 +216,9 @@ export function applicationExport({
   return {
     scholarship,
     year,
+    // The set this one score came from. Null on both where the application has no score item.
+    rubric_version: score?.rubric_version ?? null,
+    model_id: score?.model_id ?? null,
     exported_at: new Date().toISOString(),
     reviewed: false,
     reasoning_included: true,
@@ -201,13 +238,15 @@ function row(
   const score = scores?.[app.student_uuid] ?? null;
   return {
     student_uuid: app.student_uuid,
-    state: state(app),
+    state: scoreState(app),
     academic_program: app.academic_program,
     academic_level: app.academic_level,
     major: app.major,
     gpa: app.gpa,
     total_score: app.total_score,
     rubric_version: app.rubric_version,
+    // Null on a total made before the model was recorded, which is not the default having run.
+    model_id: app.model_id,
     scored_at: app.latest_scored_at,
     failure: app.failure,
     // Asked for but not returned: the file keeps the scores and says the reasoning is unread,
@@ -228,12 +267,6 @@ function row(
       };
     }),
   };
-}
-
-function state(app: ExportApplication): string {
-  if (app.status === "score_failed") return "failed";
-  if (app.total_score === null) return "unscored";
-  return "scored";
 }
 
 /** Hand the file over as a download. The JSON is indented, because a person reads it. */

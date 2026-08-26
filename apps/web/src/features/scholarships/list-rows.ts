@@ -3,6 +3,8 @@
  * this is where a search can quietly lose an applicant.
  */
 
+import { hasCurrentScore } from "./score-state";
+
 /** The fields the list reads. Both reads carry them; the ranked one projects a subset. */
 export interface ListApplication {
   sk: string;
@@ -13,6 +15,9 @@ export interface ListApplication {
   major: string | null;
   gpa: string | number | null;
   total_score: number | null;
+  rubric_version: string | null;
+  model_id: string | null;
+  claimed_until: string | null;
 }
 
 export interface ListFilters {
@@ -62,10 +67,11 @@ export function listRows<T extends ListApplication>({
   const rankedRead = ranking && !isFiltering(search, filters);
   if (!rankedRead) return { rows: matching(cohort, search, filters), rankedRead };
 
-  // The index holds the order. The cohort read holds the fields the index does not project, so a
-  // ranked row is looked up here — and nothing is reordered on the way.
-  const byKey = new Map(cohort.map((app) => [app.sk, app]));
-  return { rows: ranked.map((app) => byKey.get(app.sk) ?? app), rankedRead };
+  // The index holds the order. The cohort read holds the applicant's own fields, which a total's
+  // row does not carry, so a ranked row is looked up by the student it belongs to — and nothing is
+  // reordered on the way.
+  const byStudent = new Map(cohort.map((app) => [app.student_uuid, app]));
+  return { rows: ranked.map((app) => byStudent.get(app.student_uuid) ?? app), rankedRead };
 }
 
 /** Search and the filter panel, over the fields the cohort read carries. No essay text here. */
@@ -94,7 +100,9 @@ export function matching<T extends ListApplication>(
     if (!within(app.gpa === null ? null : Number(app.gpa), filters.gpaMin, filters.gpaMax)) {
       return false;
     }
-    if (!within(app.total_score, filters.totalMin, filters.totalMax)) return false;
+    // A superseded total is not a total the range can match — the list does not show it either.
+    const total = hasCurrentScore(app) ? app.total_score : null;
+    if (!within(total, filters.totalMin, filters.totalMax)) return false;
     return true;
   });
 }

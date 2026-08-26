@@ -1,327 +1,620 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api";
+import { Button } from "@/sjsu/components/ui/button";
+import { Card, CardContent } from "@/sjsu/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/sjsu/components/ui/table";
+import { NO_REVIEWER_SCORES, NotStored } from "@/sjsu/components/not-built";
+import { useScholarshipName } from "@/features/cohorts/cohort-picker";
+import { isAcademicYear } from "@/lib/academic-year";
+import { modelWords, setsPresent } from "@/features/scholarships/sets";
 
-interface DashboardStats {
-  total_applications: number;
-  both_scored: number;
-  flagged_for_review: number;
-  avg_variance_pct: number;
-  agreement_rate_pct: number;
-  variance_distribution: {
-    "0_5": number;
-    "5_10": number;
-    "10_20": number;
-    "20_plus": number;
+/**
+ * Scoring reliability: how far the model's total lands from the reviewers', and the same split by
+ * scholarship and by gap band.
+ *
+ * Every figure is read off the per-cohort summaries the reviewer-score ingest keeps, so the whole
+ * section costs one request and no scan. Two of them are counted per criterion rather than per
+ * application: one reviewer against another, and the model against what the reviewers averaged.
+ * Where a cohort has nothing to compare, the panel keeps its labels and says the figure is not
+ * saved â€” a zero there would read as a result.
+ *
+ * The scoring coverage panel counts scoring already done, off the cohort read.
+ */
+
+// How close two reviewers landed on the same criterion, in that criterion's own points. The key is
+// the one the server counts into, so a band the server renames shows as empty rather than as
+// somebody else's count.
+const AGREEMENT_BANDS = [
+  { key: "same", label: "Same score", color: "bg-[var(--sjsu-blue)]" },
+  { key: "within_one", label: "Within one point", color: "bg-[var(--sjsu-blue-light)]" },
+  { key: "some_difference", label: "Some difference", color: "bg-[var(--sjsu-gold)]" },
+  { key: "far_apart", label: "Far apart", color: "bg-red-500" },
+];
+
+// The same for the gap between the model's total and a reviewer's. The key is the one the server
+// counts into, so a band the server renames shows as empty rather than as somebody else's count.
+const VARIANCE_BANDS = [
+  { key: "0_5", label: "0 to 5 points", color: "bg-[var(--sjsu-blue)]" },
+  { key: "5_10", label: "5 to 10 points", color: "bg-[var(--sjsu-blue-light)]" },
+  { key: "10_20", label: "10 to 20 points", color: "bg-[var(--sjsu-gold)]" },
+  { key: "20_plus", label: "20 points or more", color: "bg-red-500" },
+];
+
+/** What the agreement read hands back. Every figure carries how many applications it covers. */
+interface Agreement {
+  totals: {
+    cohorts: number;
+    applications: number;
+    with_reviewer_scores: number;
+    /** Applications with both a model total and a reviewer total. What the mean gap is a mean of. */
+    covers: number;
+    flagged: number;
+    mean_gap: number | null;
   };
+  gap_bands: Record<string, number>;
+  scholarships: Array<{
+    scholarship: string;
+    year: string;
+    applications: number;
+    with_reviewer_scores: number;
+    covers: number;
+    flagged: number;
+    mean_gap: number | null;
+  }>;
+  /** Per criterion, in that criterion's own points. Widest apart first. */
+  criteria: Array<{ criterion: string; covers: number; mean_apart: number }>;
+  /** One pair of reviewers on one criterion is one pair, so an application can hold several. */
+  reviewer_pairs: {
+    pairs: number;
+    mean_apart: number | null;
+    bands: Record<string, number>;
+  };
+  disagreement_line: number;
+  not_built: string[];
 }
 
-interface AnalyticsData {
-  ai_human: {
-    total_applications: string;
-    total_comparisons: string;
-    avg_difference: string;
-    exact_match_rate: string;
-    within_one_point_rate: string;
-  };
-  human_vs_human: {
-    total_reviews: string;
-    avg_difference: string;
-    exact_match_rate: string;
-    within_one_point_rate: string;
-    moderate_difference_rate: string;
-    significant_difference_rate: string;
-  };
-  reviewer_distribution: Array<{ level: string; count: string; percentage: string }>;
-  scholarship_stats: Array<{
-    scholarship: string;
-    avg_difference: string;
-    exact_match_rate: string;
-    within_one_point_rate: string;
-    significant_difference_rate: string;
-  }>;
-  criterion_stats: Array<{
-    criterion: string;
-    avg_difference: string;
-    exact_match_rate: string;
-    within_one_point_rate: string;
-  }>;
+export function ReliabilitySection({
+  scholarship,
+  year,
+}: {
+  scholarship: string;
+  year: string;
+}) {
+  const agreementQuery = useQuery({
+    queryKey: ["agreement"],
+    queryFn: () => api<Agreement>("/agreement"),
+  });
+
+  const agreement = agreementQuery.data;
+  const totals = agreement?.totals;
+  const covers = totals?.covers ?? 0;
+  const bands = agreement?.gap_bands ?? {};
+  const pairs = agreement?.reviewer_pairs;
+  // No pair, no comparison. Every figure below it is a share of this number.
+  const paired = pairs?.pairs ?? 0;
+
+  return (
+    <div className="space-y-6">
+      <CoveragePanel scholarship={scholarship} year={year} />
+
+      <div>
+        <h2 className="text-xl font-semibold tracking-tight">Scoring reliability</h2>
+        <p className="mt-1 reading text-sm text-muted-foreground">
+          How far the model's total lands from the reviewers'. These figures cover every
+          scholarship, not just the cohort you picked.
+        </p>
+      </div>
+
+      {agreementQuery.isLoading && (
+        <p className="text-sm text-muted-foreground">Loading the agreement figuresâ€¦</p>
+      )}
+      {agreementQuery.isError && (
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-sm text-warning">
+            We could not load the agreement figures, so they are missing rather than zero.
+          </p>
+          <Button size="sm" variant="outline" onClick={() => agreementQuery.refetch()}>
+            Try again
+          </Button>
+        </div>
+      )}
+
+      {/* Full width, so its edges line up with every other panel on the page. The gap to the screen
+          is the page's gutter, which is a share of the window â€” see PageOutlet. */}
+      <Card
+        className="border-2"
+        style={{
+          borderColor: "var(--sjsu-gold)",
+          backgroundColor: "color-mix(in srgb, var(--sjsu-gold) 5%, transparent)",
+        }}
+      >
+        <CardContent>
+          <p className="text-base" style={{ color: "var(--sjsu-blue)" }}>
+            {covers === 0
+              ? "No application has both a model total and a reviewer total yet, so there is nothing to compare. Upload reviewer scores for a cohort that has been scored."
+              : `Across ${covers.toLocaleString()} applications with both totals, the model and the reviewers are ${totals?.mean_gap ?? "â€”"} points apart on average, out of 100. ${totals?.flagged.toLocaleString()} are ${agreement?.disagreement_line} points or more apart and are in the review queue.`}
+          </p>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <ComparisonCard
+          title="Reviewer against reviewer"
+          subtitle="How close two reviewers land on the same criterion"
+          color="var(--sjsu-blue)"
+          figures={
+            pairs && paired > 0 && pairs.mean_apart !== null
+              ? {
+                  meanApart: pairs.mean_apart,
+                  same: ((pairs.bands.same ?? 0) / paired) * 100,
+                  withinOne:
+                    (((pairs.bands.same ?? 0) + (pairs.bands.within_one ?? 0)) / paired) * 100,
+                }
+              : undefined
+          }
+        />
+        <Card>
+          <CardContent>
+            <p className="text-sm font-semibold" style={{ color: "var(--sjsu-gold)" }}>
+              Model against reviewer
+            </p>
+            <p className="mb-3 text-xs text-muted-foreground">
+              How far the model's total lands from the reviewers'
+            </p>
+            <div className="space-y-2">
+              <Figure label="Average gap">
+                {totals?.mean_gap === null || totals?.mean_gap === undefined ? (
+                  <NotStored />
+                ) : (
+                  `${totals.mean_gap} points`
+                )}
+              </Figure>
+              <Figure label="Covers">
+                {agreement ? `${covers.toLocaleString()} applications` : <NotStored />}
+              </Figure>
+              <Figure label="Far enough apart to flag">
+                {agreement ? totals?.flagged.toLocaleString() : <NotStored />}
+              </Figure>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center gap-1 text-center">
+            <p className="text-xs text-muted-foreground">Applications with both scores</p>
+            {agreement ? (
+              <p className="text-2xl font-semibold">{covers.toLocaleString()}</p>
+            ) : (
+              <NotStored />
+            )}
+            <p className="mt-3 text-xs text-muted-foreground">Flagged for review</p>
+            {agreement ? (
+              <p className="text-2xl font-semibold">{totals?.flagged.toLocaleString()}</p>
+            ) : (
+              <NotStored />
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Breakdown
+        title="Reviewer agreement"
+        blurb="How often two reviewers give a criterion the same score."
+      >
+        {/* A share of the card, not a pixel cap: the bars grow with the window but stop well short
+            of a wide monitor, where a label and its figure end up a screen apart. */}
+        <div className="w-full space-y-3 lg:w-3/4 2xl:w-1/2">
+          {AGREEMENT_BANDS.map((band) => {
+            const count = pairs?.bands[band.key];
+            return (
+              <DistBar
+                key={band.key}
+                label={band.label}
+                color={band.color}
+                pct={paired > 0 ? ((count ?? 0) / paired) * 100 : undefined}
+                count={paired > 0 ? (count ?? 0) : undefined}
+              />
+            );
+          })}
+        </div>
+        {agreement && paired === 0 && (
+          <p className="mt-3 text-sm text-muted-foreground">
+            No criterion has been scored by two reviewers yet, so there is no pair to compare. One
+            reviewer's score on its own says nothing about agreement.
+          </p>
+        )}
+      </Breakdown>
+
+      <Breakdown
+        title="Agreement by scholarship"
+        blurb="Where a second reading is worth the most."
+      >
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Scholarship</TableHead>
+              <TableHead className="text-right">Average gap</TableHead>
+              <TableHead className="text-right">With reviewer scores</TableHead>
+              <TableHead className="text-right">Both totals</TableHead>
+              <TableHead className="text-right">Flagged</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {(agreement?.scholarships ?? []).length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={5} className="whitespace-normal text-muted-foreground">
+                  {NO_REVIEWER_SCORES}
+                </TableCell>
+              </TableRow>
+            ) : (
+              agreement?.scholarships.map((row) => (
+                <TableRow key={`${row.scholarship}#${row.year}`}>
+                  <TableCell>
+                    <ScholarshipCell scholarship={row.scholarship} />{" "}
+                    <span className="text-muted-foreground">{row.year}</span>
+                  </TableCell>
+                  {/* A cohort with no comparable pair has no mean, and a dash there would read as
+                      a measured zero. */}
+                  <TableCell className="text-right tabular-nums">
+                    {row.mean_gap === null ? <NotStored /> : row.mean_gap}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.with_reviewer_scores.toLocaleString()} of{" "}
+                    {row.applications.toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.covers.toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.flagged.toLocaleString()}
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </Breakdown>
+
+      <Breakdown
+        title="Disagreement by criterion"
+        blurb="Which criteria the model and the reviewers score differently, widest apart first."
+      >
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Criterion</TableHead>
+              <TableHead className="text-right">Average apart</TableHead>
+              <TableHead className="text-right">Applications</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {(agreement?.criteria ?? []).length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={3} className="whitespace-normal text-muted-foreground">
+                  {NO_REVIEWER_SCORES}
+                </TableCell>
+              </TableRow>
+            ) : (
+              agreement?.criteria.map((row) => (
+                <TableRow key={row.criterion}>
+                  <TableCell>{criterionWords(row.criterion)}</TableCell>
+                  {/* In the criterion's own marks, not out of 100: a rubric puts one criterion out
+                      of 4 and another out of 10, and a share would hide which one that was. */}
+                  <TableCell className="text-right tabular-nums">
+                    {row.mean_apart} marks
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.covers.toLocaleString()}
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </Breakdown>
+
+      <Breakdown
+        title="Score gap between the model and a reviewer"
+        blurb="How far apart the model's total and a reviewer's total end up, in points."
+      >
+        {/* A bar is read by its length against the ones above it, so the group takes a share of the
+            card rather than the whole width of a wide monitor. */}
+        <div className="w-full space-y-3 lg:w-3/4 2xl:w-1/2">
+          {VARIANCE_BANDS.map((band) => {
+            const count = bands[band.key];
+            return (
+              <DistBar
+                key={band.label}
+                label={band.label}
+                color={band.color}
+                // A share of the applications the bands cover, so four bars read against each
+                // other rather than against the whole cohort.
+                pct={agreement && covers > 0 ? ((count ?? 0) / covers) * 100 : undefined}
+                count={agreement && covers > 0 ? (count ?? 0) : undefined}
+              />
+            );
+          })}
+        </div>
+        {agreement && covers === 0 && (
+          <p className="mt-3 text-sm text-muted-foreground">{NO_REVIEWER_SCORES}</p>
+        )}
+      </Breakdown>
+    </div>
+  );
 }
 
 /**
- * Reliability analysis across every scholarship: human reviewers against each other, the model
- * against them, and the per-criterion and per-scholarship breakdowns.
- *
- * It is waiting on last year's reader scores, which have not been delivered. Until they are,
- * every section here says so and draws nothing — a zero or a percentage of nothing reads as a
- * result. The two fetches are separate and neither gates the other, and neither gates the
- * trigger section above.
+ * A criterion's id as words. The figures cover every rubric at once, and two rubrics can name the
+ * same criterion differently, so the id is what they all agree on.
  */
-export function ReliabilitySection() {
-  const statsQuery = useQuery({
-    queryKey: ["dashboard-stats"],
-    queryFn: () => api<DashboardStats>("/dashboard/stats"),
-    retry: false,
-  });
+function criterionWords(criterion: string): string {
+  const words = criterion.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
 
-  const analyticsQuery = useQuery({
-    queryKey: ["analytics"],
-    queryFn: () => api<AnalyticsData>("/analytics"),
-    retry: false,
-  });
+/** The wording the export used, since the summary holds only the slug it was turned into. */
+function ScholarshipCell({ scholarship }: { scholarship: string }) {
+  return <>{useScholarshipName(scholarship)}</>;
+}
 
-  const stats = statsQuery.data;
-  const analytics = analyticsQuery.data;
-
-  if (statsQuery.isLoading || analyticsQuery.isLoading) {
-    return <p className="text-sm text-muted-foreground">Reading the reliability data…</p>;
-  }
-
-  if (!stats && !analytics) {
-    return <WaitingOnData />;
-  }
-
-  const aiAvgDiff = parseFloat(analytics?.ai_human.avg_difference ?? "0");
-  const humanAvgDiff = parseFloat(analytics?.human_vs_human.avg_difference ?? "0");
-  const improvementPct = humanAvgDiff > 0 ? Math.round((1 - aiAvgDiff / humanAvgDiff) * 100) : 0;
-
+/** One titled part of the section. Its body is either its figures or the line standing in for them. */
+function Breakdown({
+  title,
+  blurb,
+  children,
+}: {
+  title: string;
+  blurb: string;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="space-y-8">
-      <div>
-        <h2 className="text-xl font-semibold tracking-tight">Scoring reliability</h2>
-        <p className="text-sm text-muted-foreground mt-1">
-          Human reviewers against each other, and the model against them. Every scholarship, not
-          one cohort.
-        </p>
-      </div>
-
-      {/* Row 1: Key Insight Banner */}
-      {analytics && <div className="p-5 rounded-lg border-2" style={{ borderColor: 'var(--sjsu-gold)', backgroundColor: 'rgba(229, 168, 35, 0.05)' }}>
-        <p className="text-base font-medium" style={{ color: 'var(--sjsu-blue)' }}>
-          Human reviewers disagree with each other by an average of <strong>{humanAvgDiff}</strong> points per criterion.
-          The AI disagrees with humans by <strong>{aiAvgDiff}</strong> points &mdash;{" "}
-          <span style={{ color: 'var(--sjsu-gold)' }}>{improvementPct}% more consistent</span> than human-to-human scoring.
-        </p>
-      </div>}
-
-      {/* Row 2: Side-by-Side Comparison */}
-      {analytics && stats && <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <ComparisonCard
-          title="Human vs Human"
-          subtitle="Inter-rater reliability"
-          avgDiff={humanAvgDiff}
-          exactMatch={analytics?.human_vs_human.exact_match_rate ?? "0"}
-          withinOne={analytics?.human_vs_human.within_one_point_rate ?? "0"}
-          color="var(--sjsu-blue)"
-        />
-        <ComparisonCard
-          title="AI vs Human"
-          subtitle="Model agreement"
-          avgDiff={aiAvgDiff}
-          exactMatch={analytics?.ai_human.exact_match_rate ?? "0"}
-          withinOne={analytics?.ai_human.within_one_point_rate ?? "0"}
-          color="var(--sjsu-gold)"
-        />
-        <div className="p-5 rounded-lg border border-border flex flex-col justify-center items-center text-center">
-          <p className="text-xs text-muted-foreground mb-2">Applications Scored</p>
-          <p className="text-3xl font-bold" style={{ color: 'var(--sjsu-blue)' }}>
-            {stats?.both_scored.toLocaleString() ?? "0"}
-          </p>
-          <p className="text-xs text-muted-foreground mt-3">Flagged for Review</p>
-          <p className="text-2xl font-bold text-red-600">
-            {stats?.flagged_for_review.toLocaleString() ?? "0"}
-          </p>
-        </div>
-      </div>}
-
-      {(!analytics || !stats) && <WaitingOnData />}
-
-      {/* Row 3: Human Reviewer Agreement Distribution */}
-      {analytics?.reviewer_distribution && analytics.reviewer_distribution.length > 0 && (
-        <div className="p-6 rounded-lg border border-border">
-          <h2 className="text-lg font-semibold mb-1">Human Reviewer Agreement</h2>
-          <p className="text-sm text-muted-foreground mb-5">
-            How often do two human reviewers give the same score for a criterion?
-          </p>
-          <div className="space-y-3">
-            {analytics.reviewer_distribution.map((row) => (
-              <DistBar
-                key={row.level}
-                label={row.level}
-                pct={parseFloat(row.percentage)}
-                color={
-                  row.level === "Exact Match" ? "bg-[#0055A2]" :
-                  row.level === "Very Close" ? "bg-[#1a7fd4]" :
-                  row.level === "Moderate Difference" ? "bg-[#E5A823]" :
-                  "bg-red-500"
-                }
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Row 4: By Scholarship Type */}
-      {analytics?.scholarship_stats && analytics.scholarship_stats.length > 0 && (
-        <div className="p-6 rounded-lg border border-border">
-          <h2 className="text-lg font-semibold mb-1">Agreement by Scholarship Type</h2>
-          <p className="text-sm text-muted-foreground mb-5">
-            Human inter-rater reliability varies significantly by scholarship. This tells us where AI oversight adds the most value.
-          </p>
-          <div className="border border-border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/50">
-                  <th className="text-left px-4 py-2.5 font-medium">Scholarship</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Avg Diff</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Exact Match</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Within 1pt</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Significant Diff</th>
-                </tr>
-              </thead>
-              <tbody>
-                {analytics.scholarship_stats.map((row) => (
-                  <tr key={row.scholarship} className="border-b border-border last:border-0">
-                    <td className="px-4 py-2.5 font-medium">{row.scholarship}</td>
-                    <td className="px-4 py-2.5 text-right">{parseFloat(row.avg_difference).toFixed(2)}</td>
-                    <td className="px-4 py-2.5 text-right">{parseFloat(row.exact_match_rate).toFixed(1)}%</td>
-                    <td className="px-4 py-2.5 text-right">{parseFloat(row.within_one_point_rate).toFixed(1)}%</td>
-                    <td className={`px-4 py-2.5 text-right ${parseFloat(row.significant_difference_rate) > 10 ? "text-red-600 font-medium" : ""}`}>
-                      {parseFloat(row.significant_difference_rate).toFixed(1)}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Row 5: By Criterion */}
-      {analytics?.criterion_stats && analytics.criterion_stats.length > 0 && (
-        <div className="p-6 rounded-lg border border-border">
-          <h2 className="text-lg font-semibold mb-1">Human Disagreement by Criterion</h2>
-          <p className="text-sm text-muted-foreground mb-5">
-            Which scoring criteria cause the most disagreement between human reviewers?
-          </p>
-          <div className="space-y-3">
-            {analytics.criterion_stats
-              .sort((a, b) => parseFloat(b.avg_difference) - parseFloat(a.avg_difference))
-              .map((row) => (
-                <div key={row.criterion} className="flex items-center gap-4">
-                  <span className="text-sm w-44 text-right font-medium truncate">{row.criterion}</span>
-                  <div className="flex-1 h-7 bg-muted rounded overflow-hidden relative">
-                    <div
-                      className="h-full rounded transition-all"
-                      style={{
-                        width: `${Math.min(100, parseFloat(row.avg_difference) / 3 * 100)}%`,
-                        backgroundColor: parseFloat(row.avg_difference) > 1.5 ? '#E5A823' : '#0055A2',
-                      }}
-                    />
-                    <span className="absolute inset-y-0 right-2 flex items-center text-xs font-medium">
-                      {parseFloat(row.avg_difference).toFixed(2)} avg diff
-                    </span>
-                  </div>
-                  <span className="text-xs text-muted-foreground w-24">
-                    {parseFloat(row.within_one_point_rate).toFixed(0)}% within 1pt
-                  </span>
-                </div>
-              ))}
-          </div>
-        </div>
-      )}
-
-      {/* Row 6: Variance Distribution (existing) */}
-      {stats && (
-        <div className="p-6 rounded-lg border border-border">
-          <h2 className="text-lg font-semibold mb-1">AI vs Human Variance Distribution</h2>
-          <p className="text-sm text-muted-foreground mb-5">
-            Score difference (absolute points) between AI and human weighted totals.
-          </p>
-          <div className="space-y-3">
-            <DistBar label="0-5 pts" pct={stats.both_scored > 0 ? (stats.variance_distribution["0_5"] / stats.both_scored) * 100 : 0} color="bg-[#0055A2]" count={stats.variance_distribution["0_5"]} />
-            <DistBar label="5-10 pts" pct={stats.both_scored > 0 ? (stats.variance_distribution["5_10"] / stats.both_scored) * 100 : 0} color="bg-[#1a7fd4]" count={stats.variance_distribution["5_10"]} />
-            <DistBar label="10-20 pts" pct={stats.both_scored > 0 ? (stats.variance_distribution["10_20"] / stats.both_scored) * 100 : 0} color="bg-[#E5A823]" count={stats.variance_distribution["10_20"]} />
-            <DistBar label="20+ pts" pct={stats.both_scored > 0 ? (stats.variance_distribution["20_plus"] / stats.both_scored) * 100 : 0} color="bg-red-500" count={stats.variance_distribution["20_plus"]} />
-          </div>
-        </div>
-      )}
-    </div>
+    <Card>
+      <CardContent>
+        <h3 className="text-lg font-semibold">{title}</h3>
+        <p className="mt-1 mb-5 text-sm text-muted-foreground">{blurb}</p>
+        {children}
+      </CardContent>
+    </Card>
   );
 }
 
-function ComparisonCard({
+/**
+ * One side of the reviewer-against-reviewer comparison, per criterion.
+ *
+ * `figures` is left out where there is no pair to compare: the title and every label still render,
+ * and each number reads as not saved. Nothing is formatted, so no zero can turn into "0.00 points".
+ */
+export function ComparisonCard({
   title,
   subtitle,
-  avgDiff,
-  exactMatch,
-  withinOne,
   color,
+  figures,
 }: {
   title: string;
   subtitle: string;
-  avgDiff: number;
-  exactMatch: string;
-  withinOne: string;
   color: string;
+  figures?: { meanApart: number; same: number; withinOne: number };
 }) {
   return (
-    <div className="p-5 rounded-lg border border-border">
-      <p className="text-sm font-semibold" style={{ color }}>{title}</p>
-      <p className="text-xs text-muted-foreground mb-3">{subtitle}</p>
-      <div className="space-y-2">
-        <div className="flex justify-between">
-          <span className="text-xs text-muted-foreground">Avg Difference</span>
-          <span className="text-sm font-bold">{avgDiff.toFixed(2)} pts</span>
+    <Card>
+      <CardContent>
+        <p className="text-sm font-semibold" style={{ color }}>
+          {title}
+        </p>
+        <p className="mb-3 text-xs text-muted-foreground">{subtitle}</p>
+        <div className="space-y-2">
+          <Figure label="Average gap">
+            {figures ? `${figures.meanApart.toFixed(2)} points` : <NotStored />}
+          </Figure>
+          <Figure label="Same score">
+            {figures ? `${figures.same.toFixed(1)}%` : <NotStored />}
+          </Figure>
+          <Figure label="Within one point">
+            {figures ? `${figures.withinOne.toFixed(1)}%` : <NotStored />}
+          </Figure>
         </div>
-        <div className="flex justify-between">
-          <span className="text-xs text-muted-foreground">Exact Match</span>
-          <span className="text-sm font-medium">{parseFloat(exactMatch).toFixed(1)}%</span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-xs text-muted-foreground">Within 1 Point</span>
-          <span className="text-sm font-medium">{parseFloat(withinOne).toFixed(1)}%</span>
-        </div>
-      </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** One labelled number in a comparison card. */
+function Figure({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-sm font-medium">{children}</span>
     </div>
   );
 }
 
-function DistBar({
+/**
+ * One bar of a distribution. Shows a count when it has one, a percentage otherwise.
+ *
+ * Leaving `pct` out is how a bar waits: the row keeps its place and its label, the track is drawn
+ * empty rather than filled to zero, and the figure reads as not saved.
+ */
+export function DistBar({
   label,
   pct,
   color,
   count,
 }: {
   label: string;
-  pct: number;
+  pct?: number;
   color: string;
   count?: number;
 }) {
+  let figure: React.ReactNode = <NotStored />;
+  if (pct !== undefined) {
+    figure = count !== undefined ? count.toLocaleString() : `${Math.round(pct)}%`;
+  }
   return (
     <div className="flex items-center gap-4">
-      <span className="text-sm w-28 text-right font-medium">{label}</span>
-      <div className="flex-1 h-6 bg-muted rounded overflow-hidden">
-        <div
-          className={`h-full ${color} rounded transition-all`}
-          style={{ width: `${Math.min(100, pct)}%` }}
-        />
-      </div>
-      <span className="text-sm w-20 text-muted-foreground text-right">
-        {count !== undefined ? `${count.toLocaleString()}` : `${Math.round(pct)}%`}
-      </span>
+      <span className="w-36 shrink-0 text-right text-sm font-medium">{label}</span>
+      {pct === undefined ? (
+        <div className="h-6 flex-1 rounded border border-dashed border-border" />
+      ) : (
+        <div className="h-6 flex-1 overflow-hidden rounded bg-muted">
+          <div
+            className={`h-full rounded ${color} transition-all`}
+            style={{ width: `${Math.min(100, pct)}%` }}
+          />
+        </div>
+      )}
+      <span className="w-20 shrink-0 text-right text-sm text-muted-foreground">{figure}</span>
     </div>
   );
 }
 
-/** No human scores have been delivered, so there is nothing to compare and nothing to draw. */
-function WaitingOnData() {
+/** The part of the cohort read this panel uses. */
+interface Coverage {
+  total: number;
+  states: { scored: number; unscored: number; running: number; failed: number };
+  scored_by_rubric_version: Record<string, number>;
+  /** One count per set, keyed `<rubric version>#<model>`. Off the totals, not the applications. */
+  scored_by_set: Record<string, number>;
+}
+
+const STATE_WORDS: Array<[keyof Coverage["states"], string]> = [
+  ["scored", "Scored"],
+  ["unscored", "Not scored yet"],
+  ["running", "Being scored"],
+  ["failed", "Could not be scored"],
+];
+
+/**
+ * How much of the picked cohort has been scored, and under which rubric version.
+ *
+ * The only real numbers in this section. It reads the cohort the controls above are pointed at,
+ * under the same query key, so picking a cohort fills this in without a second request.
+ */
+function CoveragePanel({ scholarship, year }: { scholarship: string; year: string }) {
+  const scoped = scholarship !== "" && isAcademicYear(year);
+
+  const cohortQuery = useQuery({
+    queryKey: ["cohort", scholarship, year],
+    queryFn: () =>
+      api<Coverage>(
+        `/cohort?scholarship=${encodeURIComponent(scholarship)}&year=${encodeURIComponent(year)}`,
+      ),
+    enabled: scoped,
+  });
+
+  const coverage = scoped ? cohortQuery.data : undefined;
+  const versions = Object.entries(coverage?.scored_by_rubric_version ?? {});
+  const sets = setsPresent(coverage?.scored_by_set ?? {});
+
   return (
-    <div className="p-5 rounded-lg border border-border">
-      <h2 className="text-lg font-semibold">Scoring reliability</h2>
-      <p className="text-sm text-muted-foreground mt-1">
-        Waiting on data. Last year's reader scores have not been delivered, so there is nothing
-        to compare the model against — no agreement rate, no variance, and no chart.
-      </p>
-    </div>
+    <Card>
+      <CardContent className="space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold">Scoring coverage</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            How much of the picked cohort has been scored, and under which rubric version.
+          </p>
+        </div>
+
+        {!scoped && (
+          <p className="text-sm text-muted-foreground">Pick a cohort above to fill this in.</p>
+        )}
+        {scoped && cohortQuery.isLoading && (
+          <p className="text-sm text-muted-foreground">Loading the cohortâ€¦</p>
+        )}
+        {scoped && cohortQuery.isError && (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm text-warning">
+              We could not load this cohort, so the counts are missing.
+            </p>
+            <Button size="sm" variant="outline" onClick={() => cohortQuery.refetch()}>
+              Try again
+            </Button>
+          </div>
+        )}
+
+        {coverage && (
+          <>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {STATE_WORDS.map(([state, word]) => (
+                <div key={state} className="rounded-lg border border-border p-3">
+                  <p className="text-xs text-muted-foreground">{word}</p>
+                  <p className="text-2xl font-semibold">
+                    {coverage.states[state].toLocaleString()}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {coverage.total.toLocaleString()} applications in this cohort.
+            </p>
+
+            {versions.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Nothing here has been scored yet, so there is no rubric version to count.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Scored under each rubric version</h3>
+                {/* Two short columns. Stretched to the window the version and its count sit at
+                    opposite ends of the screen, so this one is as wide as it needs to be. */}
+                <Table containerClassName="w-fit" className="w-auto min-w-0">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Rubric version</TableHead>
+                      <TableHead className="text-right">Applications</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {versions.map(([version, count]) => (
+                      <TableRow key={version}>
+                        <TableCell>{version}</TableCell>
+                        <TableCell className="text-right">{count.toLocaleString()}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+
+            {sets.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="text-sm font-medium">Totals in each set</h3>
+                {sets.length > 1 && (
+                  <p className="text-xs text-warning">
+                    This cohort holds totals in {sets.length} sets. A set is one rubric version
+                    scored by one model, and two totals from different sets are not a straight
+                    comparison. An application scored in two sets is counted in both.
+                  </p>
+                )}
+                <Table containerClassName="w-fit" className="w-auto min-w-0">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Rubric version</TableHead>
+                      <TableHead>Model</TableHead>
+                      <TableHead className="text-right">Totals</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sets.map((set) => (
+                      <TableRow key={`${set.rubric_version}#${set.model_id}`}>
+                        <TableCell>{set.rubric_version}</TableCell>
+                        <TableCell>{modelWords(set.model_id)}</TableCell>
+                        <TableCell className="text-right">{set.count.toLocaleString()}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }

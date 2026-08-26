@@ -1,11 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, TriangleAlert } from "lucide-react";
 import { api } from "@/api";
 import { Badge } from "@/sjsu/components/ui/badge";
 import { Button } from "@/sjsu/components/ui/button";
 import { Card, CardContent } from "@/sjsu/components/ui/card";
 import { Separator } from "@/sjsu/components/ui/separator";
+import { modelLabel } from "@/lib/models";
 import { applicationExport, download } from "./export";
+import { scoreState, type ScoreState } from "./score-state";
+import { UNKNOWN_MODEL, setWords } from "./sets";
 
 interface QAPair {
   question_id: string;
@@ -22,6 +25,7 @@ interface Application {
   gpa: string | number | null;
   total_score: number | null;
   rubric_version: string | null;
+  model_id: string | null;
   latest_scored_at: string | null;
   category_scores: Record<string, { score: number; max: number }> | null;
   claimed_until: string | null;
@@ -44,7 +48,8 @@ interface ScoreItem {
   total_score: number;
   reasoning_summary: string;
   rubric_version: string;
-  model_id: string;
+  // Null on a score written before the model was recorded. That is not the default having run.
+  model_id: string | null;
   worker: string;
 }
 
@@ -55,9 +60,18 @@ interface Criterion {
   weight: number;
 }
 
+/** One set this application has been scored in: its newest attempt there. Newest set first. */
+interface ScoredSet {
+  rubric_version: string;
+  model_id: string;
+  total_score: number;
+  scored_at: string;
+}
+
 interface DetailResponse {
   application: Application;
   score: ScoreItem | null;
+  sets: ScoredSet[];
 }
 
 interface VersionsResponse {
@@ -92,6 +106,10 @@ export function ApplicationDetail({
 
   const application = data?.application;
   const score = data?.score ?? null;
+  const sets = data?.sets ?? [];
+  // A score item is still readable after the answers change or while a rescore runs. Which of
+  // those it is decides whether this screen presents it as the score or as the previous one.
+  const state = application ? scoreState(application) : "unscored";
   // The criteria of the version this score was made under, in the rubric's own order. A
   // criterion the score does not carry is shown as missing rather than as a zero.
   const criteria =
@@ -145,19 +163,32 @@ export function ApplicationDetail({
             </CardContent>
           </Card>
 
+          {sets.length > 0 && (
+            <SetsCard
+              sets={sets}
+              shown={score ? { version: score.rubric_version, model: score.model_id } : null}
+            />
+          )}
+
           {score === null ? (
             <NoScore application={application} />
           ) : (
             <div className="space-y-4">
+              <PreviousScoreNotice state={state} />
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-lg font-semibold">Scores by criterion</h2>
+                <h2 className="text-lg font-semibold">
+                  {state === "scored" ? "Scores by criterion" : "The previous scores by criterion"}
+                </h2>
                 <Badge variant="secondary">total {score.total_score}</Badge>
                 <Badge variant="outline">rubric {score.rubric_version}</Badge>
+                {modelLabel(score.model_id) && (
+                  <Badge variant="outline">{modelLabel(score.model_id)}</Badge>
+                )}
                 <Badge variant="outline">unreviewed</Badge>
               </div>
               <p className="text-sm text-muted-foreground">
-                Scored by {score.model_id} on the {score.worker} path. Nobody has signed this
-                off — reviewer sign-off is not built.
+                Scored by {score.model_id ?? "a model this score does not name"} on the{" "}
+                {score.worker} path. Nobody has signed this off — reviewer sign-off is not built.
               </p>
 
               <Card size="sm">
@@ -197,6 +228,56 @@ export function ApplicationDetail({
   );
 }
 
+/**
+ * Every total this application holds, one line per set. Two models at the same rubric version are
+ * two numbers for the same applicant, and the only place both can be read is here.
+ *
+ * `shown` is the set the scores below came from — the newest attempt of all of them.
+ */
+function SetsCard({
+  sets,
+  shown,
+}: {
+  sets: ScoredSet[];
+  shown: { version: string; model: string | null } | null;
+}) {
+  return (
+    <Card size="sm">
+      <CardContent className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-lg font-semibold">Totals for this application</h2>
+          {sets.length > 1 && <Badge variant="warning">{sets.length} sets</Badge>}
+        </div>
+        {sets.length > 1 && (
+          <p className="text-sm text-muted-foreground">
+            One line per rubric version and model. Two of these numbers are not a better and a
+            worse score — they are two readings, and only one of them is below.
+          </p>
+        )}
+        <div className="space-y-1">
+          {sets.map((set) => {
+            const here =
+              shown !== null &&
+              set.rubric_version === shown.version &&
+              set.model_id === (shown.model ?? UNKNOWN_MODEL);
+            return (
+              <div
+                key={`${set.rubric_version}#${set.model_id}`}
+                className="flex flex-wrap items-center gap-2 text-sm"
+              >
+                <Badge variant={here ? "secondary" : "outline"}>total {set.total_score}</Badge>
+                <span>{setWords(set.rubric_version, set.model_id)}</span>
+                <span className="text-muted-foreground">{set.scored_at}</span>
+                {here && <Badge variant="outline">shown below</Badge>}
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function CriterionCard({
   criterion,
   scored,
@@ -228,6 +309,32 @@ function CriterionCard({
             This criterion is not on the score item, so there is nothing to read.
           </p>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Why the scores below are not this application's current score. Nothing when they are. */
+function PreviousScoreNotice({ state }: { state: ScoreState }) {
+  if (state === "scored") return null;
+
+  const reason =
+    state === "needs_rescore"
+      ? "The answers changed after these scores were made, so they were scored from text this"
+        + " application no longer holds. They stay here to be read; a run from the dashboard"
+        + " replaces them."
+      : state === "running"
+        ? "A run holds this application right now. These are the scores it had before, and they"
+          + " are replaced when the run writes its own."
+        : state === "failed"
+          ? "The last attempt failed. These are the scores from before it."
+          : "These are not this application's current scores.";
+
+  return (
+    <Card size="sm" className="border-warning">
+      <CardContent className="flex items-start gap-2">
+        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
+        <p className="text-sm">{reason}</p>
       </CardContent>
     </Card>
   );

@@ -17,6 +17,9 @@ function app(student: string, extra: Partial<ListApplication> = {}): ListApplica
     major: "Computer Science",
     gpa: 3.75,
     total_score: 80,
+    rubric_version: "v1",
+    model_id: "us.anthropic.claude-sonnet-4-6",
+    claimed_until: null,
     ...extra,
   };
 }
@@ -25,6 +28,12 @@ const SCORED_HIGH = app("aaa-high", { total_score: 90 });
 const SCORED_LOW = app("aaa-low", { total_score: 60 });
 const UNSCORED = app("aaa-unscored", { status: "parsed", total_score: null });
 const FAILED = app("aaa-failed", { status: "score_failed", total_score: null });
+// Scored, then the applicant's answers changed: ingest keeps the total and takes the version off.
+const SUPERSEDED = app("aaa-changed", {
+  status: "parsed",
+  total_score: 95,
+  rubric_version: null,
+});
 
 const COHORT = [SCORED_LOW, UNSCORED, FAILED, SCORED_HIGH];
 // What the index returns: only the two with a comparable total, highest first.
@@ -39,6 +48,22 @@ describe("listRows", () => {
 
     expect(rankedRead).toBe(true);
     expect(shown.map((row) => row.student_uuid)).toEqual(["aaa-high", "aaa-low"]);
+  });
+
+  it("takes the applicant's own fields off the cohort read, not off the ranked row", () => {
+    // A total's row carries the number and the student, nothing about the applicant. Joining on
+    // that student is what fills the columns; joining on anything else empties them.
+    const thin = app("aaa-high", { total_score: 90, academic_program: null, major: null });
+    const { rows: shown } = listRows({
+      ranking: true,
+      search: "",
+      filters: EMPTY_FILTERS,
+      cohort: COHORT,
+      ranked: [thin],
+    });
+
+    expect(shown[0]?.major).toBe("Computer Science");
+    expect(shown[0]?.total_score).toBe(90);
   });
 
   it("finds an unscored or failed applicant while the list is ranked", () => {
@@ -66,6 +91,20 @@ describe("listRows", () => {
   it("leaves an application out when a range it has no number for is set", () => {
     // A missing total passing a bound would rank an unscored applicant among the scored ones.
     const { rows: shown } = rows(false, "", { ...EMPTY_FILTERS, totalMin: "70" });
+
+    expect(shown.map((row) => row.student_uuid)).toEqual(["aaa-high"]);
+  });
+
+  it("does not match a totals range against a score the content has moved past", () => {
+    // 95 is stored, but it was made from answers this application no longer holds — the list
+    // shows no number for it, so a range must not find one either.
+    const { rows: shown } = listRows({
+      ranking: false,
+      search: "",
+      filters: { ...EMPTY_FILTERS, totalMin: "70" },
+      cohort: [...COHORT, SUPERSEDED],
+      ranked: RANKED,
+    });
 
     expect(shown.map((row) => row.student_uuid)).toEqual(["aaa-high"]);
   });
