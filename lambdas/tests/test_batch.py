@@ -14,7 +14,7 @@ import pytest
 from boto3.dynamodb.conditions import Key
 
 from shared.model import Answer
-from shared.prompt import static_prefix
+from shared.prompt import system_blocks
 from shared.work import rubric_version_item
 from workers import score_batch, score_ondemand
 from helpers import SCHOLARSHIP, YEAR, put_application, put_version, read, stamp
@@ -143,13 +143,16 @@ def test_a_record_carries_the_same_prompt_as_an_on_demand_call_and_nothing_more(
     table: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Batch takes no tool definition and no structured-output setting, and fails hours later on one."""
-    put_version(table, "v1", CRITERIA, preamble="Score the whole application.")
+    put_version(table, "v1", CRITERIA)
     item = put_application(table, "one")
 
-    sent: dict[str, str] = {}
+    sent: dict[str, Any] = {}
 
-    def fake_converse(*, model_id: str, prompt: str, max_tokens: int = 2000) -> Answer:
-        sent["prompt"] = prompt
+    def fake_converse(
+        *, model_id: str, system: list[dict[str, str]], user_text: str, max_tokens: int = 2000
+    ) -> Answer:
+        sent["system"] = system
+        sent["user_text"] = user_text
         return Answer(text=json.dumps(REPLY), input_tokens=1, output_tokens=1)
 
     monkeypatch.setattr(score_ondemand, "converse", fake_converse)
@@ -157,15 +160,14 @@ def test_a_record_carries_the_same_prompt_as_an_on_demand_call_and_nothing_more(
         {"scholarship": SCHOLARSHIP, "year": YEAR, "rubric_version": "v1"}, Context()
     )
 
-    prefix = static_prefix(rubric_version_item(SCHOLARSHIP, "v1"))
-    line = score_batch.record(item, prefix)
-    text = line["modelInput"]["messages"][0]["content"][0]["text"]
+    system = system_blocks(rubric_version_item(SCHOLARSHIP, "v1"))
+    line = score_batch.record(item, system)
 
-    assert text == sent["prompt"]
-    assert text.startswith(prefix)
+    assert line["modelInput"]["system"] == sent["system"] == system
+    assert line["modelInput"]["messages"][0]["content"][0]["text"] == sent["user_text"]
     assert line["recordId"] == "one"
     assert set(line) == {"recordId", "modelInput"}
-    assert set(line["modelInput"]) == {"messages", "inferenceConfig"}
+    assert set(line["modelInput"]) == {"system", "messages", "inferenceConfig"}
 
 
 def test_each_record_lands_on_the_application_whose_id_it_is(table: Any, collecting: Any) -> None:

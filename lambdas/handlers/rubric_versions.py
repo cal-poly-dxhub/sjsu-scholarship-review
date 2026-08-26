@@ -1,7 +1,7 @@
 """GET a scholarship's rubric versions, newest first.
 
-`source_text` is left out: it is provenance a person asks for one version at a time, not
-something a list needs to carry.
+`source_text` is carried: it is the file the model reads, and the dashboard compares it to tell
+a weights-only change from a criteria change before anyone presses a button.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from shared.versions import newest_first
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-LIST_FIELDS = "sk, criteria, preamble, source_file, published_at, published_by"
+LIST_FIELDS = "sk, criteria, preamble, source_file, source_text, published_at, published_by"
 
 
 def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:

@@ -1,25 +1,30 @@
 """Building the prompt. One implementation, used by both workers.
 
-The rubric text the model reads is assembled from the rubric item's `criteria` and
-`preamble`, so the text and the ranges the reply check enforces cannot disagree. The file a
-version was published from is never read here.
+The prompt is two system parts and one user part. The first system part is the rubric file
+the version was published from, sent exactly as it was stored — the file the scholarship
+office wrote is the file the model reads. The second is the output contract, generated from
+the rubric item's `criteria` so the ids and ranges the reply check enforces are the ones
+the model is given. The user part is the applicant's own text and nothing else.
 
-The prompt is a static part — rubric, instructions, schema — followed by the applicant's own
-text, with nothing per-item in the static part. No cache checkpoint is placed and no cache
-saving is claimed: the static part is about 1,000 tokens against a 4,096-token minimum.
+No cache checkpoint is placed and no cache saving is claimed: the system parts are about
+1,000 tokens against a 4,096-token minimum.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-SCHEMA_BLOCK = """
+CONTRACT_HEAD = """Score the application against the rubric above.
+
+The criteria, and the id to use for each:"""
+
+CONTRACT_TAIL = """
 Return one JSON object and nothing else. No prose, no markdown fence.
 
 {
   "criterion_scores": [
     {
-      "criterion_id": "the id given for the criterion, exactly as written above",
+      "criterion_id": "one of the ids listed above",
       "score": 0,
       "reasoning": "why this score, in one or two sentences",
       "evidence": "the applicant's own words you scored from"
@@ -29,34 +34,42 @@ Return one JSON object and nothing else. No prose, no markdown fence.
 }
 
 Rules:
-- One entry for every criterion above, using its id. No extra entries.
-- Score within that criterion's range. Whole or half points only.
+- One entry for every criterion listed above, using its id. No extra entries.
+- A score is any number from 0 up to that criterion's maximum — a whole number or a
+  fraction, as fine as the rubric calls for.
 - Do not give a total. The total is worked out from these scores.
 - Score only from the application text given. Do not invent facts.
 """
 
 
-def rubric_text(criteria: list[dict[str, Any]], preamble: str) -> str:
-    """The rubric as the model reads it: the published preamble, then each criterion."""
-    parts: list[str] = []
-    if preamble:
-        parts.append(preamble)
-
-    for criterion in criteria:
-        block = [f"Criterion: {criterion['name']} (id: {criterion['id']}, 0-{criterion['max']})"]
-        guidance = criterion.get("guidance")
-        if guidance:
-            block.append(guidance)
-        for level in criterion.get("levels", []):
-            block.append(f"- {_plain(level['value'])} = {level['description']}")
-        parts.append("\n".join(block))
-
-    return "\n\n".join(parts)
+class MissingRubricFile(Exception):
+    """A published version with no file to send. The run stops rather than assembling one."""
 
 
-def static_prefix(rubric_item: dict[str, Any]) -> str:
-    """The part of the prompt that is identical for every application in a run."""
-    return rubric_text(rubric_item["criteria"], rubric_item.get("preamble", "")) + "\n" + SCHEMA_BLOCK
+def output_contract(criteria: list[dict[str, Any]]) -> str:
+    """What the reply has to look like, and the ids and ranges it is checked against.
+
+    The ids are listed here because they are ours: they key the stored scores, the weights,
+    and the screens, and they have never appeared in a rubric file.
+    """
+    lines = [
+        f"- {criterion['id']}: {criterion['name']}, score 0 to {int(criterion['max'])}"
+        for criterion in criteria
+    ]
+    return f"{CONTRACT_HEAD}\n" + "\n".join(lines) + "\n" + CONTRACT_TAIL
+
+
+def system_blocks(rubric_item: dict[str, Any]) -> list[dict[str, str]]:
+    """The two system parts: the published file untouched, then the output contract."""
+    source_text = rubric_item.get("source_text")
+    if not isinstance(source_text, str) or not source_text.strip():
+        scholarship = str(rubric_item.get("pk", "")).removeprefix("RUBRIC#")
+        version = str(rubric_item.get("sk", "")).removeprefix("V#")
+        raise MissingRubricFile(
+            f"rubric version {version} of {scholarship} has no rubric file stored, so there is"
+            " nothing to send to the model. Publish that version again from its file."
+        )
+    return [{"text": source_text}, {"text": output_contract(rubric_item["criteria"])}]
 
 
 def applicant_text(application: dict[str, Any]) -> str:
@@ -79,9 +92,3 @@ def applicant_text(application: dict[str, Any]) -> str:
         lines.append("")
 
     return "\n".join(lines).strip()
-
-
-def _plain(value: Any) -> str:
-    """3.0 reads as 3, 3.5 stays 3.5 — the rubric's own way of writing a level."""
-    number = float(value)
-    return str(int(number)) if number == int(number) else str(number)

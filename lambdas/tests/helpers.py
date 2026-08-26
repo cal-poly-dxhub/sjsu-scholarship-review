@@ -10,6 +10,23 @@ from shared.table import cohort_pk, rank_pk, rubric_pk, rubric_sk, to_dynamo
 SCHOLARSHIP = "sjsu-general"
 YEAR = "2025-2026"
 
+# A stand-in for a published rubric file, small enough to read in a failure message. The closing
+# banner and the trailing text on each category line are the parts the old assembled prompt lost,
+# so they are here for the tests that check the file arrives whole.
+RUBRIC_FILE = """\
+================================
+Score the whole application.
+================================
+
+Category: Grit (0-2) — half points allowed (e.g., 0.5)
+- 2 = kept going
+- 0 = gave up
+
+Category: Clarity (0-5) — half points allowed (e.g., 0.5)
+- 5 = plain
+- 0 = muddled
+"""
+
 
 def stamp(minutes: int = 0) -> str:
     """A claim timestamp, in the format the workers write. Negative minutes is the past."""
@@ -53,7 +70,13 @@ def put_scored(
     )
 
 
-def put_version(table: Any, version: str, criteria: list[dict[str, Any]], preamble: str = "") -> None:
+def put_version(
+    table: Any,
+    version: str,
+    criteria: list[dict[str, Any]],
+    preamble: str = "",
+    source_text: str = RUBRIC_FILE,
+) -> None:
     table.put_item(
         Item=to_dynamo(
             {
@@ -61,7 +84,9 @@ def put_version(table: Any, version: str, criteria: list[dict[str, Any]], preamb
                 "sk": rubric_sk(version),
                 "criteria": criteria,
                 "preamble": preamble,
-                "source_file": "rubric.md",
+                "source_text": source_text,
+                # Publishing refuses a name a version already used, so seeded versions get their own.
+                "source_file": f"rubric-{version}.md",
                 "published_at": "2026-08-01T00:00:00Z",
                 "published_by": "a test",
             }

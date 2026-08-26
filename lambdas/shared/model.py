@@ -52,12 +52,15 @@ def client():
     return _client
 
 
-def converse(*, model_id: str, prompt: str, max_tokens: int = 2000) -> Answer:
+def converse(
+    *, model_id: str, system: list[dict[str, str]], user_text: str, max_tokens: int = 2000
+) -> Answer:
     """One application, one call. Temperature 0 — the same essay should score the same twice."""
     try:
         response = client().converse(
             modelId=model_id,
-            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            system=system,
+            messages=[{"role": "user", "content": [{"text": user_text}]}],
             inferenceConfig={"temperature": 0, "maxTokens": max_tokens},
         )
     except ClientError as error:

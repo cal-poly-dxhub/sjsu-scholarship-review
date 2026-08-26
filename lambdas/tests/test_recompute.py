@@ -13,7 +13,7 @@ from shared.table import rank_pk
 from shared.work import claimable, recomputable
 from shared.versions import weights_only_change
 from workers import recompute
-from helpers import SCHOLARSHIP, YEAR, put_scored, put_version, read
+from helpers import RUBRIC_FILE, SCHOLARSHIP, YEAR, put_scored, put_version, read
 
 V1 = [
     {"id": "grit", "name": "Grit", "max": 2, "weight": 40, "guidance": "", "levels": []},
@@ -39,10 +39,11 @@ class Context:
 
 
 def test_a_weight_only_change_is_recomputable_and_a_criteria_change_is_not() -> None:
-    target = {"preamble": "", "criteria": with_weights(60, 40)}
-    same_shape = {"preamble": "", "criteria": V1}
-    renamed = {"preamble": "", "criteria": [{**V1[0], "name": "Grittiness"}, V1[1]]}
-    reworded = {"preamble": "Score generously.", "criteria": V1}
+    """The rubric file is sent whole, so a single character of it is a criteria change."""
+    target = {"source_text": RUBRIC_FILE, "criteria": with_weights(60, 40)}
+    same_shape = {"source_text": RUBRIC_FILE, "criteria": V1}
+    renamed = {"source_text": RUBRIC_FILE, "criteria": [{**V1[0], "name": "Grittiness"}, V1[1]]}
+    reworded = {"source_text": RUBRIC_FILE.replace("plain", "Plain"), "criteria": V1}
 
     assert weights_only_change(same_shape, target) is True
     assert weights_only_change(renamed, target) is False

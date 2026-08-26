@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from handlers import rubric_publish
-from shared.versions import newest_first, next_version
+from shared.versions import newest_first, next_version, weights_only_change
 from helpers import SCHOLARSHIP, put_version
 
 WEIGHTS = {
@@ -18,12 +18,14 @@ WEIGHTS = {
 }
 
 
-def request(rubric_text: str) -> dict[str, Any]:
+def request(
+    rubric_text: str, source_file: str = "rubric.md", scholarship: str = SCHOLARSHIP
+) -> dict[str, Any]:
     return {
         "body": json.dumps(
             {
-                "scholarship": SCHOLARSHIP,
-                "source_file": "rubric.md",
+                "scholarship": scholarship,
+                "source_file": source_file,
                 "source_text": rubric_text,
                 "weights": WEIGHTS,
             }
@@ -36,11 +38,41 @@ def test_publishing_writes_the_next_version_and_moves_no_application(
     table: Any, rubric_text: str
 ) -> None:
     first = rubric_publish.handler(request(rubric_text), None)
-    second = rubric_publish.handler(request(rubric_text), None)
+    second = rubric_publish.handler(request(rubric_text, "rubric-reweighted.md"), None)
 
     assert json.loads(first["body"])["version"] == "v1"
     assert json.loads(second["body"])["version"] == "v2"
     assert "no application changed" in json.loads(second["body"])["note"]
+
+
+def test_a_file_name_a_version_already_used_is_refused(table: Any, rubric_text: str) -> None:
+    """The name is what tells two versions apart on screen, so it has to be each file's own."""
+    rubric_publish.handler(request(rubric_text), None)
+
+    refused = rubric_publish.handler(request(rubric_text, "rubric.md"), None)
+
+    assert refused["statusCode"] == 422
+    message = json.loads(refused["body"])["message"]
+    assert "'rubric.md' is the file v1 was published from" in message
+    assert "name of its own" in message
+    assert [item["sk"] for item in newest_first(SCHOLARSHIP)] == ["V#v1"]
+
+    # The rule is per scholarship: another one has its own list of names.
+    other = rubric_publish.handler(request(rubric_text, "rubric.md", "sjsu-other"), None)
+    assert other["statusCode"] == 201
+
+
+def test_the_same_text_under_a_new_name_is_still_a_weights_only_change(
+    table: Any, rubric_text: str
+) -> None:
+    """Comparing names instead of contents here would burn a cohort's worth of model calls."""
+    rubric_publish.handler(request(rubric_text), None)
+    rubric_publish.handler(request(rubric_text, "rubric-reweighted.md"), None)
+
+    v2, v1 = newest_first(SCHOLARSHIP)
+
+    assert v1["source_file"] != v2["source_file"]
+    assert weights_only_change(v1, v2) is True
 
 
 def test_a_publish_that_loses_the_race_takes_the_next_number(
