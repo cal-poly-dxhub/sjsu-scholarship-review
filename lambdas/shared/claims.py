@@ -1,8 +1,9 @@
 """Claiming an application before scoring it, and letting it go afterwards.
 
 A claim is a conditional write, so two workers reaching for the same item cannot both get
-it. The attempt count goes up when the claim is taken, not when it is released: a worker
-that dies holding a claim still leaves the count raised.
+it. The attempt count goes up when the claim is taken, so a worker that dies holding a claim
+leaves the count raised — nobody is left to say what happened to it. An item handed back
+unscored gets its attempt back, because handing it back says the work was never tried.
 
 The expiry only guards the on-demand path. A batch job is given 36 hours, so the batch
 claim's expiry sits past that and what actually frees a batch item is its job reaching a
@@ -82,16 +83,22 @@ def claim(
 
 
 def release(*, pk: str, sk: str, claimed_by: str, reason: str) -> bool:
-    """Give an item back unscored. The attempt count already went up when it was claimed."""
+    """Give an item back unscored, and give back the attempt the claim spent.
+
+    Nothing judged this application, so the attempt would be spent on a refused submit or a
+    throttled call rather than on a reading of it. Three of those in a row and the item is out of
+    attempts forever, with the model never having seen it — which is how a whole cohort strands.
+    """
     return _let_go(
         pk=pk,
         sk=sk,
         claimed_by=claimed_by,
         update=(
-            "SET #status = :parsed, last_error = :reason"
+            "SET #status = :parsed, last_error = :reason,"
+            " attempt = if_not_exists(attempt, :one) - :one"
             " REMOVE claimed_by, claimed_until"
         ),
-        values={":parsed": PARSED, ":reason": reason},
+        values={":parsed": PARSED, ":reason": reason, ":one": 1},
     )
 
 

@@ -145,7 +145,15 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
             },
             timeoutDurationInHours=JOB_HOURS,
         )
-    except ClientError:
+    except ClientError as error:
+        # What Bedrock said, on its own line: the traceback carries it too, but a run is only ever
+        # read about in the log, and a refused submit is the one thing worth reading there.
+        logger.error(
+            "Bedrock would not take job %s over %d applications: %s",
+            job,
+            len(claimed),
+            error.response.get("Error", {}).get("Message") or error,
+        )
         for item in claimed:
             release(
                 pk=item["pk"], sk=item["sk"], claimed_by=job,
