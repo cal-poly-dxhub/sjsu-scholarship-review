@@ -212,7 +212,9 @@ export class ComputeStack extends Stack {
       handler: 'handlers.agreement.handler',
       description: 'How far apart the model and the reviewers are, off the cohort summaries.',
     });
-    props.table.grantReadData(agreement);
+    // Write as well as read: a summary left behind by a run that died is rebuilt on the read
+    // rather than shown as it was.
+    props.table.grantReadWriteData(agreement);
     this.route('AgreementRoute', apigwv2.HttpMethod.GET, '/api/agreement', agreement);
 
     const uploadReport = this.pythonFunction('UploadReport', {

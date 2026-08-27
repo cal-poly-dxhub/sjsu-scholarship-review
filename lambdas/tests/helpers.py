@@ -56,12 +56,14 @@ def put_scored(
     total: float,
     version: str,
     category_scores: dict[str, dict[str, float]] | None = None,
+    **fields: Any,
 ) -> dict[str, Any]:
     """An application as a finished run leaves it, ranking key included."""
     return put_application(
         table,
         student,
         status="scored",
+        **fields,
         total_score=total,
         rubric_version=version,
         rank_pk=rank_pk(SCHOLARSHIP, YEAR, version),

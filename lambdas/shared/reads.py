@@ -19,6 +19,7 @@ from boto3.dynamodb.conditions import Key
 
 from .claims import FAILED, PROCESSING, SCORED, now
 from .table import (
+    COHORTS_PK,
     GAP_INDEX_NAME,
     GAP_PK,
     RANK_INDEX_NAME,
@@ -163,6 +164,21 @@ def flagged(
     page = table().query(**request)
     items = [from_dynamo(item) for item in page.get("Items", [])]
     return items, encode_cursor(page.get("LastEvaluatedKey"))
+
+
+def cohorts() -> list[dict[str, Any]]:
+    """Every cohort that has been ingested. One Query on the partition ingest keeps them in."""
+    found: list[dict[str, Any]] = []
+    start_key: dict[str, Any] | None = None
+    while True:
+        request: dict[str, Any] = {"KeyConditionExpression": Key("pk").eq(COHORTS_PK)}
+        if start_key:
+            request["ExclusiveStartKey"] = start_key
+        page = table().query(**request)
+        found.extend(from_dynamo(item) for item in page.get("Items", []))
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            return found
 
 
 def summaries() -> list[dict[str, Any]]:

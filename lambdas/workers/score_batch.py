@@ -22,6 +22,7 @@ from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from shared.claims import BATCH_CLAIM, claim, mark_failed, release
+from shared.gaps import mark_scores_changed, rebuild_summary
 from shared.model import Answer, text_of
 from shared.prompt import applicant_text, system_blocks
 from shared.quota import minimum_batch_records
@@ -152,6 +153,8 @@ def submit(event: dict[str, Any], context: Any) -> dict[str, Any]:
             )
         raise
 
+    mark_scores_changed(scholarship, year)
+
     report = {
         "worker": WORKER,
         "job": job,
@@ -247,6 +250,11 @@ def collect(detail: dict[str, Any]) -> dict[str, Any]:
         )
         counts[outcome] += 1
 
+    # Before the report and before any raise: a job that scored something and did not rebuild
+    # leaves the agreement figures behind the scores.
+    if counts["scored"]:
+        rebuild_summary(scholarship, year)
+
     report = {
         "worker": WORKER,
         "job": job,
@@ -256,6 +264,7 @@ def collect(detail: dict[str, Any]) -> dict[str, Any]:
         "rubric_version": version,
         "held": len(held),
         **counts,
+        "figures_rebuilt": bool(counts["scored"]),
         **checked_against_manifest(output_uri, job_arn, counts),
     }
     logger.info("Collected: %s", json.dumps(report))

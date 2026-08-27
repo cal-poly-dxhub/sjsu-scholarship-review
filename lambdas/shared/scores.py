@@ -3,6 +3,9 @@
 The score item is the record of one attempt and is never overwritten. The application's copy
 is what a cohort read and a ranking use, which is why `rank_pk` is written with the total and
 removed when a failure takes the total away.
+
+A new total also changes how far the model is from the reviewers, so the gap is settled here
+rather than left for the next reviewer upload — the reviewers' marks may already be stored.
 """
 
 from __future__ import annotations
@@ -13,15 +16,9 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from .claims import SCORED
+from .gaps import settle_gap
 from .reply import CheckedReply, weighted_total
-from .table import application_pk, rank_pk, score_sk, table, to_dynamo
-
-
-def cohort_of(application: dict[str, Any]) -> tuple[str, str, str]:
-    """Scholarship, year, and student uuid, read back out of the item's own keys."""
-    _, scholarship, year = application["pk"].split("#", 2)
-    student = application["sk"].removeprefix("APP#")
-    return scholarship, year, student
+from .table import application_pk, cohort_of, rank_pk, score_sk, table, to_dynamo
 
 
 def write_score(
@@ -103,6 +100,9 @@ def write_score(
             f"{application['sk']} is no longer claimed by {claimed_by} — its score was not applied"
         ) from error
 
+    # Only after the total is applied: the gap is measured against this total, and a score that
+    # lost its claim did not become the application's total.
+    settle_gap(application, total_score=total, rubric_version=rubric_version)
     return total
 
 

@@ -9,7 +9,9 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from shared.table import rank_pk
+from shared import reads
+from shared.reviewers import reviewer_name_slug
+from shared.table import GAP_PK, application_pk, rank_pk, reviewer_sk, to_dynamo
 from shared.work import claimable, recomputable
 from shared.versions import weights_only_change
 from workers import recompute
@@ -70,6 +72,48 @@ def test_a_weight_only_change_recomputes_from_stored_scores_with_no_model_call(t
     # The per-criterion scores are not rewritten to get there, and no attempt is recorded.
     assert application["category_scores"] == STORED_SCORES
     assert application["latest_scored_at"] == "2026-08-01T00:00:00.000000Z"
+
+
+def test_new_weights_move_the_gap_and_the_reviewers_total_with_the_model_s(table: Any) -> None:
+    """Both totals are on the weights, so leaving the reviewers' one alone would misstate the gap."""
+    put_version(table, "v1", V1)
+    put_version(table, "v2", with_weights(60, 40))
+    put_scored(
+        table, "one", total=80, version="v1", category_scores=STORED_SCORES,
+        reviewers_stored=1, reviewer_total=60, reviewer_count=1, score_gap=20, gap_pk=GAP_PK,
+    )
+    reviewer = {
+        "pk": application_pk(SCHOLARSHIP, YEAR, "one"),
+        "sk": reviewer_sk(reviewer_name_slug("Ann Chair")),
+    }
+    table.put_item(
+        Item=to_dynamo(
+            {
+                **reviewer,
+                "reviewer_name": "Ann Chair",
+                "category_scores": {"grit": 0, "clarity": 5},
+                "total_score": 60,
+                "rubric_version": "v1",
+            }
+        )
+    )
+
+    report = recompute.handler(
+        {"scholarship": SCHOLARSHIP, "year": YEAR, "rubric_version": "v2"}, Context()
+    )
+
+    application = read(table, "one")
+    # The model's total moves 80 → 70, and the reviewer's 0/2 and 5/5 moves 60 → 40, so the gap is
+    # 30 rather than the 10 a stale reviewer total would have said.
+    assert float(application["total_score"]) == 70
+    assert float(application["reviewer_total"]) == 40
+    assert float(application["score_gap"]) == 30
+    assert application["gap_pk"] == GAP_PK
+    assert float(table.get_item(Key=reviewer)["Item"]["total_score"]) == 40
+
+    # And the cohort's figures are rebuilt at the end of the run, not left at the old gap.
+    assert report["figures_rebuilt"] is True
+    assert float(reads.summaries()[0]["mean_gap"]) == 30
 
 
 def test_a_criteria_change_is_left_for_a_rescore(table: Any) -> None:

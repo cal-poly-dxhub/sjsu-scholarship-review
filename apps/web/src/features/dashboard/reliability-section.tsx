@@ -204,7 +204,7 @@ export function ReliabilitySection({
 
       <Breakdown
         title="Reviewer agreement"
-        blurb="How often two reviewers give a criterion the same score."
+        blurb="How often two reviewers give a criterion the same score. Counted per pair of reviewers per criterion, so one application can hold several."
       >
         {/* A share of the card, not a pixel cap: the bars grow with the window but stop well short
             of a wide monitor, where a label and its figure end up a screen apart. */}
@@ -218,6 +218,7 @@ export function ReliabilitySection({
                 color={band.color}
                 pct={paired > 0 ? ((count ?? 0) / paired) * 100 : undefined}
                 count={paired > 0 ? (count ?? 0) : undefined}
+                total={paired > 0 ? paired : undefined}
               />
             );
           })}
@@ -336,6 +337,7 @@ export function ReliabilitySection({
                 // other rather than against the whole cohort.
                 pct={agreement && covers > 0 ? ((count ?? 0) / covers) * 100 : undefined}
                 count={agreement && covers > 0 ? (count ?? 0) : undefined}
+                total={agreement && covers > 0 ? covers : undefined}
               />
             );
           })}
@@ -434,7 +436,11 @@ function Figure({ label, children }: { label: string; children: React.ReactNode 
 }
 
 /**
- * One bar of a distribution. Shows a count when it has one, a percentage otherwise.
+ * One bar of a distribution. Shows its count against the total it is a share of.
+ *
+ * The total is shown with the count because a bare figure has no unit: these bars count pairs of
+ * reviewers, not applications, and 152 on its own reads as a percentage over 100 on a page where
+ * everything else is out of 100. "152 of 270" says what the bar's length says.
  *
  * Leaving `pct` out is how a bar waits: the row keeps its place and its label, the track is drawn
  * empty rather than filled to zero, and the figure reads as not saved.
@@ -444,15 +450,23 @@ export function DistBar({
   pct,
   color,
   count,
+  total,
 }: {
   label: string;
   pct?: number;
   color: string;
   count?: number;
+  total?: number;
 }) {
   let figure: React.ReactNode = <NotStored />;
   if (pct !== undefined) {
-    figure = count !== undefined ? count.toLocaleString() : `${Math.round(pct)}%`;
+    if (count !== undefined && total !== undefined) {
+      figure = `${count.toLocaleString()} of ${total.toLocaleString()}`;
+    } else if (count !== undefined) {
+      figure = count.toLocaleString();
+    } else {
+      figure = `${Math.round(pct)}%`;
+    }
   }
   return (
     <div className="flex items-center gap-4">
@@ -467,7 +481,7 @@ export function DistBar({
           />
         </div>
       )}
-      <span className="w-20 shrink-0 text-right text-sm text-muted-foreground">{figure}</span>
+      <span className="w-28 shrink-0 text-right text-sm text-muted-foreground">{figure}</span>
     </div>
   );
 }
