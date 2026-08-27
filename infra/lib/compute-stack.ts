@@ -26,10 +26,7 @@ export interface ComputeStackProps extends EnvStackProps {
 /** The handler code. One asset for every function; the modules are small and shared. */
 const CODE_ROOT = path.join(__dirname, '..', '..', 'lambdas');
 
-// The sample Lambdas are kept for reference and are not deployed.
 const CODE_EXCLUDE = [
-  'parse-applications',
-  'score-applications',
   'requirements',
   '**/__pycache__',
   '**/*.pyc',
