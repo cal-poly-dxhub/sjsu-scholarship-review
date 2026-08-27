@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from shared.claims import ATTEMPT_LIMIT, BATCH_CLAIM, ONDEMAND_CLAIM, claim
+from shared.claims import ATTEMPT_LIMIT, BATCH_CLAIM, ONDEMAND_CLAIM, claim, release
 from shared.table import cohort_pk, to_dynamo
 from shared.work import UnknownScope, claimable
 
@@ -53,6 +53,20 @@ def test_an_item_at_the_attempt_limit_is_not_picked_up(table: Any) -> None:
 
     found = {item["sk"] for item in claimable(scholarship=SCHOLARSHIP, year=YEAR, rubric_version="v1")}
     assert "APP#spent" not in found
+
+
+def test_an_item_handed_back_unscored_keeps_its_attempts(table: Any) -> None:
+    """A refused submit or a throttled call judged nothing, so it must not spend the item's tries.
+
+    Three of them in a row and the item is out of attempts with the model never having read it,
+    which strands the whole cohort a failed run touched.
+    """
+    put_application(table, "handed-back")
+
+    for _ in range(ATTEMPT_LIMIT + 1):
+        assert claim(**key("handed-back"), claimed_by="run", rubric_version="v1") is True
+        release(**key("handed-back"), claimed_by="run", reason="nothing was submitted")
+        assert read(table, "handed-back").get("attempt", 0) == 0
 
 
 def test_a_run_claims_an_older_version_and_skips_its_own(table: Any) -> None:
