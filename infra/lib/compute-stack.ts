@@ -211,6 +211,11 @@ export class ComputeStack extends Stack {
       name: 'agreement',
       handler: 'handlers.agreement.handler',
       description: 'How far apart the model and the reviewers are, off the cohort summaries.',
+      // A stale summary is rebuilt here, which reads a whole cohort — several thousand rows, and
+      // the arithmetic over them. The API gives up at 29 seconds, but the rebuild is allowed to run
+      // on past that and store what it worked out, so the next load is fast instead of failing too.
+      timeout: Duration.minutes(15),
+      memorySize: 1024,
     });
     // Write as well as read: a summary left behind by a run that died is rebuilt on the read
     // rather than shown as it was.
@@ -262,13 +267,21 @@ export class ComputeStack extends Stack {
       // modelInvocationType on CreateModelInvocationJob is newer than the boto3 the runtime
       // ships, and without it the job would read its records as InvokeModel input.
       layers: [this.pythonLayer('Boto3Layer', 'boto3.txt', 'A boto3 that knows batch Converse.')],
+      // A submit that fails has already released its claims, so a retry re-claims the cohort and
+      // rewrites the whole input file to fail the same way. Another go is a button, not a retry.
+      retryAttempts: 0,
     });
     props.table.grantReadWriteData(batch);
     props.bucket.grantReadWrite(batch, `${BUCKET_PREFIXES.batch}*`);
     batch.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['bedrock:CreateModelInvocationJob', 'bedrock:GetModelInvocationJob'],
-        resources: [`arn:aws:bedrock:${this.region}:${this.account}:model-invocation-job/*`],
+        // Creating a job is checked against the model it is for as well as the job itself, so the
+        // model has to be named here too or the submit is refused before a job exists.
+        resources: [
+          `arn:aws:bedrock:${this.region}:${this.account}:model-invocation-job/*`,
+          ...this.modelResources(),
+        ],
       }),
     );
     batch.addToRolePolicy(
@@ -356,7 +369,7 @@ export class ComputeStack extends Stack {
     });
   }
 
-  /** The role Bedrock itself uses for a batch job. It reaches `batch/` in this bucket, nothing else. */
+  /** The role Bedrock itself uses for a batch job: `batch/` in this bucket, and the model. */
   private batchServiceRole(): iam.Role {
     const role = new iam.Role(this, 'BatchServiceRole', {
       roleName: `${this.props.envName}-bedrock-batch`,
@@ -368,10 +381,19 @@ export class ComputeStack extends Stack {
           },
         },
       }),
-      description: 'Lets a Bedrock batch job read its input and write its output.',
+      description: 'Lets a Bedrock batch job read its input, call the model, and write its output.',
     });
     this.props.bucket.grantRead(role, `${BUCKET_PREFIXES.batch}*`);
     this.props.bucket.grantWrite(role, `${BUCKET_PREFIXES.batch}*`);
+    // The job runs the calls under this role, not the one that created it, so a submit the lambda
+    // is allowed to make still fails at the first record without this. A cross-region profile
+    // needs the model in every region it can route to, which is what the wildcard region covers.
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: this.modelResources(),
+      }),
+    );
     return role;
   }
 

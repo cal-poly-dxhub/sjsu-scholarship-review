@@ -35,14 +35,25 @@ from .table import (
     table,
 )
 
-# What a list, a search, and the counts need. `qa_pairs` is left out, and so are the fields
-# that are the workers' bookkeeping rather than anything a person reads: `content_hash`,
-# `source`, `claimed_by`.
+# What the figures are added up from. `qa_pairs` is left out, and so are the fields that are the
+# workers' bookkeeping rather than anything a person reads: `content_hash`, `source`, `claimed_by`.
 COHORT_FIELDS = (
     "pk, sk, student_uuid, scholarship, #year, #status, academic_program, academic_level,"
     " major, gpa, category_scores, total_score, rubric_version, rank_pk, latest_scored_at,"
     " claimed_until, attempt, failure, last_error, parsed_at, reviewer_total, reviewer_count,"
     " reviewers_stored, score_gap, reviewer_criteria"
+)
+
+# What a list, a search, the counts, and the cohort export need — which is the set above without
+# the two fields no screen shows. `reviewer_criteria` is per criterion per reviewer and is read
+# only by the summary rebuild; `last_error` is read only on one application's own page. Together
+# they are three quarters of a big cohort's bytes, and a response Lambda cannot hand back is a
+# screen that loads nothing at all.
+SCREEN_FIELDS = (
+    "pk, sk, student_uuid, scholarship, #year, #status, academic_program, academic_level,"
+    " major, gpa, category_scores, total_score, rubric_version, rank_pk, latest_scored_at,"
+    " claimed_until, attempt, failure, parsed_at, reviewer_total, reviewer_count,"
+    " reviewers_stored, score_gap"
 )
 
 # What the review queue's rows show. The gap index projects these, so asking for more would fetch
@@ -71,15 +82,22 @@ MAX_PAGE = 1000
 BATCH_KEYS = 100
 
 
-def cohort(scholarship: str, year: str) -> list[dict[str, Any]]:
-    """Every application in one cohort, without its essays. One Query, paged to the end."""
+def cohort(
+    scholarship: str, year: str, *, fields: str = COHORT_FIELDS
+) -> list[dict[str, Any]]:
+    """Every application in one cohort, without its essays. One Query, paged to the end.
+
+    `fields` is what to project. It defaults to everything the figures are worked out from; a read
+    answering a screen passes `SCREEN_FIELDS`, because the whole cohort goes out in one response
+    and Lambda will not hand back more than six megabytes of it.
+    """
     found: list[dict[str, Any]] = []
     start_key: dict[str, Any] | None = None
     while True:
         request: dict[str, Any] = {
             "KeyConditionExpression": Key("pk").eq(cohort_pk(scholarship, year))
             & Key("sk").begins_with("APP#"),
-            "ProjectionExpression": COHORT_FIELDS,
+            "ProjectionExpression": fields,
             "ExpressionAttributeNames": NAMES,
         }
         if start_key:
