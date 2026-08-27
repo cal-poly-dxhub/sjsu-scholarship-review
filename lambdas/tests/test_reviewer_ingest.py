@@ -1,10 +1,11 @@
 """Reading a reviewer-score file: what it places, what it refuses, and the gap it leaves behind.
 
-Four things here destroy work rather than fail. A cell read as a zero instead of as unreadable
+Five things here destroy work rather than fail. A cell read as a zero instead of as unreadable
 moves a total by as much as the part nobody saw. A row placed on a near-match puts a chair's score
 on the wrong applicant. A re-ingest that adds to a counter cannot be told from one that did not
-run. And a gap left behind after the total it was measured against is gone keeps an application in
-the review queue with nothing on the other side of the comparison.
+run. A gap left behind after the total it was measured against is gone keeps an application in
+the review queue with nothing on the other side of the comparison. And a file read before the
+cohort is scored has no gap to report, which reads as a cohort where nobody disagreed.
 
 The rubric here is a fixture with unequal maxima, so a total worked out per criterion cannot pass
 by accident against a rubric where every criterion is out of the same number.
@@ -18,9 +19,11 @@ import pytest
 
 from shared import reads
 from shared.claims import mark_failed
+from shared.reply import CriterionScore
 from shared.reviewers import DISAGREEMENT
+from shared.scores import write_score
 from shared.table import GAP_PK, cohort_pk
-from tests.helpers import SCHOLARSHIP, YEAR, put_scored, put_version, read
+from tests.helpers import SCHOLARSHIP, YEAR, put_application, put_scored, put_version, read
 from workers import ingest, reviewer_ingest
 
 BUCKET = "an-ingest-bucket"
@@ -52,14 +55,6 @@ COLUMN_OF = {criterion: column for column, criterion in reviewer_ingest.CRITERIO
 
 ANN = "Ann Chair"
 BO = "Bo Chair"
-
-
-@pytest.fixture(autouse=True)
-def _forget_criteria() -> Any:
-    """The worker caches a version's criteria per container, and each test writes its own."""
-    reviewer_ingest._criteria_cache.clear()
-    yield
-    reviewer_ingest._criteria_cache.clear()
 
 
 def student(identifier: str) -> str:
@@ -175,6 +170,67 @@ def test_the_file_own_total_is_read_past(table: Any, monkeypatch: Any) -> None:
 
     assert reviewer_items(student(identifier))[0]["total_score"] == 80
     assert read(table, student(identifier))["reviewer_total"] == 80
+
+
+def test_marks_read_before_any_score_are_kept_and_settle_when_the_score_lands(
+    table: Any, monkeypatch: Any
+) -> None:
+    """The order the office works in: the chairs' file first, the scoring run afterwards."""
+    identifier = "0123456789AB"
+    uuid = student(identifier)
+    put_version(table, VERSION, CRITERIA)
+    put_application(table, uuid)
+
+    report = ingest_rows(monkeypatch, [row(identifier, (ANN, EIGHTY))])
+
+    # The marks are stored, and the report says they are waiting rather than reporting no
+    # disagreements — there is no model total on the other side of the comparison yet.
+    assert report["applications_placed"] == 1
+    assert report["awaiting_scores"] == 1
+    assert report["flagged"] == 0
+    waiting = read(table, uuid)
+    assert waiting["reviewers_stored"] == 1
+    for missing in ("reviewer_total", "score_gap", "gap_pk"):
+        assert missing not in waiting
+    assert "total_score" not in reviewer_items(uuid)[0]
+
+    table.update_item(
+        Key={"pk": waiting["pk"], "sk": waiting["sk"]},
+        UpdateExpression="SET claimed_by = :who",
+        ExpressionAttributeValues={":who": "a worker"},
+    )
+    write_score(
+        application=read(table, uuid),
+        reply=full_marks(),
+        criteria=CRITERIA,
+        rubric_version=VERSION,
+        model_id="a-model",
+        worker="a-test",
+        input_tokens=10,
+        output_tokens=20,
+        claimed_by="a worker",
+    )
+
+    # No second upload: the score is what finishes the arithmetic.
+    scored = read(table, uuid)
+    assert float(scored["total_score"]) == 100
+    assert float(scored["reviewer_total"]) == 80
+    assert float(scored["score_gap"]) == 20
+    assert scored["gap_pk"] == GAP_PK
+    assert float(reviewer_items(uuid)[0]["total_score"]) == 80
+
+
+def full_marks() -> Any:
+    """A checked reply scoring every criterion at its maximum, so the model's total is 100."""
+
+    class Reply:
+        scores = [
+            CriterionScore(criterion["id"], criterion["max"], criterion["max"], "", "")
+            for criterion in CRITERIA
+        ]
+        reasoning_summary = "Full marks."
+
+    return Reply()
 
 
 def test_the_gap_carries_the_flag_only_while_it_reaches_the_line(table: Any) -> None:

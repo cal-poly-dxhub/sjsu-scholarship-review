@@ -102,6 +102,13 @@ def application_pk(scholarship: str, year: str, student_uuid: str) -> str:
     return f"APP#{scholarship}#{year}#{student_uuid}"
 
 
+def cohort_of(application: dict[str, Any]) -> tuple[str, str, str]:
+    """Scholarship, year, and student uuid, read back out of the item's own keys."""
+    _, scholarship, year = application["pk"].split("#", 2)
+    student = application["sk"].removeprefix("APP#")
+    return scholarship, year, student
+
+
 def score_sk(timestamp: str) -> str:
     return f"SCORE#{timestamp}"
 

@@ -9,9 +9,13 @@ damaged, missing, or not in the cohort is reported with its row number and never
 guesswork: Excel turns some of these identifiers into scientific notation before the file reaches
 us, and a near-match would put a reviewer's score on the wrong applicant.
 
-A reviewer's total is worked out here from their per-criterion scores and the weights of the rubric
-version that produced the model's total. The file's own `Weighted Points` column is read past — it
+A reviewer's total comes from their per-criterion scores and the weights of the rubric version that
+produced the model's total, worked out by `shared.gaps` — the same arithmetic a scoring run uses, so
+either order of arrival gives the same gap. The file's own `Weighted Points` column is read past: it
 does not reproduce from the per-criterion scores, so it is not the number the model's total is on.
+
+A file read before the cohort has been scored still stores every mark. There is nothing to compare
+them against yet, so the report says how many are waiting rather than reporting no disagreements.
 
 Nothing here scores, and nothing here signs off. What it adds is a number: how far apart the model
 and the reviewers are.
@@ -27,31 +31,24 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from shared import reads
-from shared.reply import CriterionScore, weighted_total
-from shared.reviewers import (
-    BANDS,
-    DISAGREEMENT,
-    PAIR_BAND_NAMES,
-    band_of,
-    flagged,
-    gap,
-    pair_band_of,
-    reviewer_name_slug,
+from shared.gaps import (
+    criteria_of,
+    criterion_shape,
+    rebuild_summary,
+    reviewer_total,
+    store_gap,
 )
+from shared.reviewers import DISAGREEMENT, reviewer_name_slug
 from shared.rows import RowsError, cell, read_rows
-from shared.scores import cohort_of
 from shared.table import (
-    GAP_PK,
     REPORTS_PK,
-    SUMMARIES_PK,
     application_pk,
+    cohort_of,
     report_sk,
     reviewer_sk,
-    summary_sk,
     table,
     to_dynamo,
 )
-from shared.work import MissingRubric, rubric_version_item
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -123,10 +120,24 @@ def ingest_file(bucket: str, key: str) -> dict[str, Any]:
         return store_report(refusal(key, str(error)))
 
     stored = 0
+    awaiting = 0
     for application, per_reviewer in placed:
-        stored += write_reviewers(scholarship, application, per_reviewer, source=key)
+        reviewers, comparable = write_reviewers(
+            scholarship, application, per_reviewer, source=key
+        )
+        stored += reviewers
+        if not comparable:
+            awaiting += 1
 
     summary = rebuild_summary(scholarship, year)
+
+    if awaiting:
+        logger.info(
+            "%s of %s applications have reviewer marks and no model total to compare them"
+            " against. Their gaps settle when the cohort is scored.",
+            awaiting,
+            len(placed),
+        )
 
     return store_report(
         {
@@ -139,6 +150,7 @@ def ingest_file(bucket: str, key: str) -> dict[str, Any]:
             "rejected_rows": rejected[:REPORTED_REJECTS],
             "rejected_total": len(rejected),
             "flagged": summary["flagged"],
+            "awaiting_scores": awaiting,
             "disagreement_line": DISAGREEMENT,
         }
     )
@@ -279,8 +291,13 @@ def write_reviewers(
     per_reviewer: dict[str, dict[str, float]],
     *,
     source: str,
-) -> int:
-    """Store each reviewer's scores for one application, then its gap. Returns reviewers stored."""
+) -> tuple[int, bool]:
+    """Store each reviewer's scores for one application, then its gap.
+
+    Returns how many reviewers were stored and whether the gap could be measured. It cannot be
+    where the model has not scored the application yet — the marks are kept and the gap settles
+    when the score lands.
+    """
     criteria = criteria_of(scholarship, application.get("rubric_version"))
     totals: list[float] = []
 
@@ -296,98 +313,7 @@ def write_reviewers(
         totals=totals,
         per_criterion=criterion_shape(per_reviewer),
     )
-    return len(per_reviewer)
-
-
-def criterion_shape(per_reviewer: dict[str, dict[str, float]]) -> dict[str, dict[str, Any]]:
-    """Per criterion: what the reviewers averaged, and how far any two of them were apart.
-
-    Worked out per application and kept on it, so the cohort's figures are added up from the read
-    the summary rebuild already does. `apart` and its bands are only there where two reviewers
-    scored the same criterion — one reviewer is not a comparison, and a zero there would read as
-    perfect agreement.
-    """
-    by_criterion: dict[str, list[float]] = {}
-    for scores in per_reviewer.values():
-        for criterion_id, score in scores.items():
-            by_criterion.setdefault(criterion_id, []).append(score)
-
-    shaped: dict[str, dict[str, Any]] = {}
-    for criterion_id, scores in by_criterion.items():
-        entry: dict[str, Any] = {
-            "mean": round(sum(scores) / len(scores), 2),
-            "reviewers": len(scores),
-        }
-        apart = [
-            abs(one - other)
-            for index, one in enumerate(scores)
-            for other in scores[index + 1 :]
-        ]
-        if apart:
-            entry["pairs"] = len(apart)
-            entry["apart_sum"] = round(sum(apart), 2)
-            entry["bands"] = {
-                name: sum(1 for difference in apart if pair_band_of(difference) == name)
-                for name in PAIR_BAND_NAMES
-            }
-        shaped[criterion_id] = entry
-    return shaped
-
-
-_criteria_cache: dict[tuple[str, str], list[dict[str, Any]] | None] = {}
-
-
-def criteria_of(scholarship: str, version: Any) -> list[dict[str, Any]] | None:
-    """The criteria of the rubric version that produced the model's total, or nothing.
-
-    Nothing means there is no total to compare against — an unscored application, or a version
-    whose criteria are not stored. Either way a gap would be a comparison between two different
-    rubrics, which is not a comparison.
-    """
-    if not version:
-        return None
-    wanted = (scholarship, str(version))
-    if wanted not in _criteria_cache:
-        try:
-            criteria = rubric_version_item(*wanted).get("criteria")
-        except MissingRubric:
-            criteria = None
-        _criteria_cache[wanted] = criteria or None
-    return _criteria_cache[wanted]
-
-
-def reviewer_total(
-    scores: dict[str, float],
-    criteria: list[dict[str, Any]] | None,
-    application: dict[str, Any],
-) -> float | None:
-    """One reviewer's total on the same weights the model's total is on, or nothing.
-
-    Nothing where the application has no model total, where the version's criteria are not stored,
-    where the reviewer left a criterion unscored, or where a score is outside its own maximum. A
-    part of a total is not a total, and comparing one against a whole one overstates the gap.
-    """
-    if criteria is None or application.get("total_score") is None:
-        return None
-    if any(criterion["id"] not in scores for criterion in criteria):
-        return None
-
-    checked: list[CriterionScore] = []
-    for criterion in criteria:
-        maximum = int(criterion["max"])
-        score = scores[criterion["id"]]
-        if score < 0 or score > maximum:
-            return None
-        checked.append(
-            CriterionScore(
-                criterion_id=str(criterion["id"]),
-                score=score,
-                max=maximum,
-                reasoning="",
-                evidence="",
-            )
-        )
-    return weighted_total(checked, criteria)
+    return len(per_reviewer), bool(totals)
 
 
 def store_reviewer(
@@ -435,146 +361,6 @@ def store_reviewer(
         ExpressionAttributeNames={"#source": "source"},
         ExpressionAttributeValues=to_dynamo(values),
     )
-
-
-def store_gap(
-    application: dict[str, Any],
-    *,
-    stored: int,
-    totals: list[float],
-    per_criterion: dict[str, dict[str, Any]] | None = None,
-) -> None:
-    """The reviewers' total and how far it is from the model's, on the application itself.
-
-    `reviewers_stored` is how many reviewers scored the application and is written either way, so a
-    screen can tell an application no reviewer scored from one the model has not scored.
-    `reviewer_total` and the gap are only written when there is something to compare, and `gap_pk`
-    only while that gap reaches the line — so the queue's index holds the queue and nothing else.
-    `reviewer_criteria` is what the per-criterion figures are added up from. Nothing scoring owns is
-    touched.
-    """
-    sets = ["reviewers_stored = :stored"]
-    values: dict[str, Any] = {":stored": stored}
-    gone = ["reviewer_criteria"]
-
-    if per_criterion:
-        sets.append("reviewer_criteria = :criteria")
-        values[":criteria"] = per_criterion
-        gone = []
-
-    if not totals:
-        gone += ["reviewer_total", "reviewer_count", "score_gap", "gap_pk"]
-    else:
-        total = round(sum(totals) / len(totals), 2)
-        apart = round(gap(float(application["total_score"]), total), 2)
-        sets += ["reviewer_total = :total", "reviewer_count = :count", "score_gap = :gap"]
-        values.update({":total": total, ":count": len(totals), ":gap": apart})
-        if flagged(apart):
-            sets.append("gap_pk = :queue")
-            values[":queue"] = GAP_PK
-        else:
-            gone.append("gap_pk")
-
-    expression = "SET " + ", ".join(sets)
-    if gone:
-        expression += " REMOVE " + ", ".join(gone)
-
-    table().update_item(
-        Key={"pk": application["pk"], "sk": application["sk"]},
-        UpdateExpression=expression,
-        ExpressionAttributeValues=to_dynamo(values),
-    )
-
-
-def rebuild_summary(scholarship: str, year: str) -> dict[str, Any]:
-    """One cohort's reviewer-score figures, rebuilt from what the cohort holds.
-
-    Rebuilt and never incremented: the office corrects files and re-uploads them, and a counter
-    that was added to twice cannot be told from one that was added to once.
-    """
-    applications = reads.cohort(scholarship, year)
-    bands = {name: 0 for name, _ in BANDS}
-    gaps = [
-        float(application["score_gap"])
-        for application in applications
-        if application.get("score_gap") is not None
-    ]
-    for apart in gaps:
-        bands[band_of(apart)] += 1
-
-    summary = {
-        "pk": SUMMARIES_PK,
-        "sk": summary_sk(scholarship, year),
-        "scholarship": scholarship,
-        "year": year,
-        "applications": len(applications),
-        "with_reviewer_scores": sum(
-            1 for application in applications if application.get("reviewers_stored")
-        ),
-        "with_both_totals": len(gaps),
-        "flagged": sum(1 for apart in gaps if flagged(apart)),
-        "mean_gap": round(sum(gaps) / len(gaps), 2) if gaps else None,
-        "gap_bands": bands,
-        "criterion_gaps": criterion_gaps(applications),
-        "reviewer_pairs": reviewer_pairs(applications),
-        "disagreement_line": DISAGREEMENT,
-        "rebuilt_at": stamp(),
-    }
-    table().put_item(Item=to_dynamo(summary))
-    return summary
-
-
-def criterion_gaps(applications: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Per criterion, how far the model's score is from what the reviewers averaged.
-
-    In that criterion's own points, and only over applications where both scored it — the model's
-    per-criterion score is on the application, and the reviewers' mean is beside it. A criterion the
-    model has not scored is left out rather than counted as agreement.
-    """
-    apart: dict[str, list[float]] = {}
-    for application in applications:
-        model = application.get("category_scores") or {}
-        for criterion_id, reviewers in (application.get("reviewer_criteria") or {}).items():
-            scored = model.get(criterion_id)
-            if not scored or scored.get("score") is None:
-                continue
-            apart.setdefault(criterion_id, []).append(
-                abs(float(scored["score"]) - float(reviewers["mean"]))
-            )
-
-    return {
-        criterion_id: {
-            "covers": len(differences),
-            "mean_apart": round(sum(differences) / len(differences), 2),
-        }
-        for criterion_id, differences in apart.items()
-    }
-
-
-def reviewer_pairs(applications: list[dict[str, Any]]) -> dict[str, Any]:
-    """How close two reviewers land on the same criterion, over the whole cohort.
-
-    Counted per pair of reviewers per criterion, so an application three chairs scored weighs more
-    than one two scored — the comparison is between two readings, and it holds three of them.
-    """
-    pairs = 0
-    apart = 0.0
-    bands = {name: 0 for name in PAIR_BAND_NAMES}
-    for application in applications:
-        for figures in (application.get("reviewer_criteria") or {}).values():
-            if not figures.get("pairs"):
-                continue
-            pairs += int(figures["pairs"])
-            apart += float(figures["apart_sum"])
-            for name, count in (figures.get("bands") or {}).items():
-                if name in bands:
-                    bands[name] += int(count)
-
-    return {
-        "pairs": pairs,
-        "mean_apart": round(apart / pairs, 2) if pairs else None,
-        "bands": bands,
-    }
 
 
 def refusal(key: str, reason: str) -> dict[str, Any]:

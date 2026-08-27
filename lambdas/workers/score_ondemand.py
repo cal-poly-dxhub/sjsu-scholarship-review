@@ -7,6 +7,9 @@ worker stops claiming while it still has time to finish what it holds.
 A reply that fails the check is retried once with what was wrong included, because a second
 identical call at temperature 0 gives the same bad reply. A throttle is not a failure: the
 item is handed back and stays claimable.
+
+The run notes on the cohort that its totals are moving and rebuilds the cohort's agreement
+figures when it finishes, so a reviewer file read before any of this shows its gaps afterwards.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import os
 from typing import Any
 
 from shared.claims import ONDEMAND_CLAIM, claim, mark_failed, release
+from shared.gaps import mark_scores_changed, rebuild_summary
 from shared.model import Transient, converse
 from shared.prompt import applicant_text, system_blocks
 from shared.reply import ReplyError, check_reply
@@ -57,6 +61,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         scope=event.get("scope"),
         limit=event.get("limit"),
     )
+    mark_scores_changed(scholarship, year)
 
     counts = {"scored": 0, "failed": 0, "released": 0, "stale": 0, "claimed_elsewhere": 0}
     reasons: list[dict[str, str]] = []
@@ -86,6 +91,11 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if reason:
             reasons.append({"application": item["sk"], "outcome": outcome, "reason": reason})
 
+    # Before the report and before any raise: a run that scored something and did not rebuild
+    # leaves the agreement figures behind the scores.
+    if counts["scored"]:
+        rebuild_summary(scholarship, year)
+
     report = {
         "worker": WORKER,
         "run": run_id,
@@ -96,6 +106,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         **counts,
         "not_reached": len(items) - reached,
         "problems": reasons,
+        "figures_rebuilt": bool(counts["scored"]),
     }
     logger.info("Run finished: %s", json.dumps(report))
 

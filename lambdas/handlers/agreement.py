@@ -1,9 +1,13 @@
 """GET how far apart the model and the reviewers are, per cohort and over all of them.
 
-Every figure here is read off the per-cohort summaries the reviewer-score ingest rebuilds, so this
-is one Query and never a scan. Every figure carries how many applications it covers: an application
-only counts once it has both a model total and a reviewer total, and most of a cohort usually does
-not.
+Every figure here is read off the per-cohort summaries a reviewer upload or a scoring run rebuilds,
+so this is one Query and never a scan. Every figure carries how many applications it covers: an
+application only counts once it has both a model total and a reviewer total, and most of a cohort
+usually does not.
+
+A run that died before it could rebuild would leave those figures behind its scores, so this read
+checks each cohort's summary against when its totals last changed and rebuilds the ones that are
+behind. That costs a cohort read, and only for a cohort that is actually behind.
 
 One reviewer against another is here too, counted per pair of reviewers per criterion, and so is the
 per-criterion difference between the model and the reviewers. Both are added up from figures the
@@ -15,8 +19,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from shared.gaps import rebuild_summary, stale_cohorts
 from shared.http import reply
-from shared.reads import summaries
+from shared.reads import cohorts, summaries
 from shared.reviewers import BANDS, DISAGREEMENT, PAIR_BAND_NAMES
 
 log = logging.getLogger()
@@ -24,7 +29,7 @@ log.setLevel(logging.INFO)
 
 
 def handler(_event: dict[str, Any], _context: object) -> dict[str, Any]:
-    per_cohort = summaries()
+    per_cohort = brought_up_to_date(summaries(), cohorts())
 
     log.info("agreement figures over %d cohorts", len(per_cohort))
     return reply(
@@ -50,6 +55,31 @@ def handler(_event: dict[str, Any], _context: object) -> dict[str, Any]:
             "not_built": [],
         },
     )
+
+
+def brought_up_to_date(
+    per_cohort: list[dict[str, Any]], known: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The summaries, with any that are behind their cohort's scores rebuilt first.
+
+    A refresh is the last thing that can catch this, so it catches it rather than showing a figure
+    it knows is old. A cohort in step costs nothing here.
+    """
+    behind = stale_cohorts(per_cohort, known)
+    if not behind:
+        return per_cohort
+
+    rebuilt = {}
+    for scholarship, year in behind:
+        log.info("%s %s scored since its figures were built, so they were rebuilt", scholarship, year)
+        rebuilt[(scholarship, year)] = rebuild_summary(scholarship, year)
+
+    kept = [
+        summary
+        for summary in per_cohort
+        if (str(summary.get("scholarship")), str(summary.get("year"))) not in rebuilt
+    ]
+    return kept + list(rebuilt.values())
 
 
 def criteria(per_cohort: list[dict[str, Any]]) -> list[dict[str, Any]]:

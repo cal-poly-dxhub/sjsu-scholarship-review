@@ -7,6 +7,9 @@ item is the record of a model attempt, and no attempt happened here.
 A criteria change is not this worker's job. `recomputable` only hands back applications whose
 stored version matches the target on everything the model saw, so anything else stays where it
 is and needs a rescore.
+
+New weights move the reviewers' totals too, so each application's gap is settled as its total
+moves and the cohort's figures are rebuilt at the end.
 """
 
 from __future__ import annotations
@@ -18,8 +21,8 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from shared.scores import cohort_of
-from shared.table import rank_pk, table, to_dynamo
+from shared.gaps import mark_scores_changed, rebuild_summary, settle_gap
+from shared.table import cohort_of, rank_pk, table, to_dynamo
 from shared.work import recomputable, rubric_version_item
 
 logger = logging.getLogger()
@@ -43,6 +46,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         for criterion in rubric_version_item(scholarship, version)["criteria"]
     }
     items = recomputable(scholarship=scholarship, year=year, rubric_version=version)
+    mark_scores_changed(scholarship, year)
 
     counts = {"moved": 0, "moved_on": 0, "unusable": 0}
     problems: list[dict[str, str]] = []
@@ -76,7 +80,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         "not_reached": len(items) - reached,
         "problems": problems,
         "model_calls": 0,
+        "figures_rebuilt": bool(counts["moved"]),
     }
+    if counts["moved"]:
+        rebuild_summary(scholarship, year)
     logger.info("Recompute finished: %s", json.dumps(report))
     return report
 
@@ -105,12 +112,15 @@ def recomputed_total(category_scores: dict[str, Any], weights: dict[str, float])
 
 
 def move(*, item: dict[str, Any], stored: str, version: str, total: float) -> bool:
-    """Write the new total and version, and move the ranking key with them.
+    """Write the new total and version, move the ranking key with them, and settle the gap.
 
     Conditional on the version the item was read at, so a scoring run that reached this
     application first keeps its score — a recompute never overwrites a newer number. That
     condition is the whole of the concurrency control here; there is no claim, because the
     write is one update and takes no time to lose.
+
+    The reviewers' total is on the same weights as the model's, so new weights move both. Left
+    alone it would read as a measured comparison against a total that no longer exists.
     """
     scholarship, year, _ = cohort_of(item)
     try:
@@ -135,4 +145,6 @@ def move(*, item: dict[str, Any], stored: str, version: str, total: float) -> bo
         if error.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
         return False
+
+    settle_gap(item, total_score=total, rubric_version=version)
     return True

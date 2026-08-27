@@ -26,6 +26,7 @@ import boto3  # noqa: E402  — after the fake credentials, or boto3 looks for r
 import pytest  # noqa: E402
 from moto import mock_aws  # noqa: E402
 
+from shared import gaps  # noqa: E402
 from shared import table as tbl  # noqa: E402
 from shared.rubric import parse_rubric  # noqa: E402
 
@@ -104,6 +105,14 @@ def table(_table_once: Any) -> Any:
     for item in _table_once.scan(ProjectionExpression="pk, sk").get("Items", []):
         _table_once.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
     return _table_once
+
+
+@pytest.fixture(autouse=True)
+def _forget_criteria() -> Any:
+    """A version's criteria are cached per container, and each test publishes its own version."""
+    gaps._criteria_cache.clear()
+    yield
+    gaps._criteria_cache.clear()
 
 
 @pytest.fixture
