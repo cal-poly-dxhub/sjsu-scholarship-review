@@ -1,256 +1,268 @@
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Search, TriangleAlert, X } from "lucide-react";
 import { api } from "@/api";
-import { ReviewDetail } from "./review-detail";
-import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { Badge } from "@/sjsu/components/ui/badge";
+import { Button } from "@/sjsu/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/sjsu/components/ui/table";
+import { EmptyState } from "@/sjsu/components/empty-state";
+import { hasEmptyMessage, TableEmptyOverlay } from "@/sjsu/components/table-empty-overlay";
+import { FilterInput, FilterRange } from "@/sjsu/components/filter-controls";
+import { NotBuilt } from "@/sjsu/components/not-built";
+import { Paging } from "@/sjsu/components/paging";
+import { useScholarshipName } from "@/features/cohorts/cohort-picker";
+import {
+  EMPTY_QUEUE_FILTERS,
+  queueRows,
+  type FlaggedApplication,
+  type QueueFilters,
+} from "./queue-rows";
 
-interface ReviewItem {
-  application_key: string;
-  gpa: string | null;
-  major: string | null;
-  availability_id: string | null;
-  human_weighted_total: number;
-  llm_weighted_score: number;
-  variance_pct: number;
+interface FlaggedResponse {
+  applications: FlaggedApplication[];
+  cursor: string | null;
+  disagreement_line: number;
+  why: string;
+  reviewed: boolean;
 }
 
-interface ReviewsResponse {
-  reviews: ReviewItem[];
-}
+// One screen's worth. The server pages the queue, so this is what a page asks for.
+const PAGE_SIZE = 50;
 
-const PAGE_SIZE = 100;
+// The filters narrow the page in hand, not the queue behind it, because the queue is paged on the
+// server in gap order. Said once here and shown under the table.
+const NARROWS_THIS_PAGE = "Filters narrow this page of the queue, not the queue behind it.";
 
-export function ReviewsPage() {
-  const [selectedAppKey, setSelectedAppKey] = useState<string | null>(null);
-  const [page, setPage] = useState(0);
-  const [filters, setFilters] = useState({
-    appKey: "",
-    major: "",
-    gpaMin: "",
-    gpaMax: "",
-    humanMin: "",
-    humanMax: "",
-    aiMin: "",
-    aiMax: "",
-    varianceMin: "",
-    varianceMax: "",
-  });
+/**
+ * The review queue: the applications where a reviewer's score and the model's are far enough apart
+ * to need a second look.
+ *
+ * Being in the queue is the whole of being flagged — the read comes off the gap index, which holds
+ * only those applications, widest gap first. It crosses cohorts, so every row says which
+ * scholarship it came from. Nothing here signs anything off, and looking at a row does not clear
+ * it: a gap goes away when a corrected score makes it smaller.
+ */
+export function ReviewsPage({ onSelectApp }: { onSelectApp?: (studentUuid: string) => void }) {
   const [showFilters, setShowFilters] = useState(false);
+  const [filters, setFilters] = useState(EMPTY_QUEUE_FILTERS);
+  const [page, setPage] = useState(0);
+  // Server pages come back as opaque markers. Index 0 is the first page, so it has none.
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
 
-  const { data, isLoading, refetch } = useQuery({
-    queryKey: ["reviews"],
-    queryFn: () => api<ReviewsResponse>("/reviews"),
+  const queue = useQuery({
+    queryKey: ["flagged", page],
+    queryFn: () => {
+      const marker = cursors[page];
+      return api<FlaggedResponse>(
+        `/flagged?limit=${PAGE_SIZE}` + (marker ? `&cursor=${encodeURIComponent(marker)}` : ""),
+      );
+    },
   });
 
-  const filtered = useMemo(() => {
-    if (!data?.reviews) return [];
-    return data.reviews.filter((item) => {
-      if (filters.appKey && !item.application_key.toLowerCase().includes(filters.appKey.toLowerCase())) return false;
-      if (filters.major && !(item.major ?? "").toLowerCase().includes(filters.major.toLowerCase())) return false;
+  const applications = queue.data?.applications ?? [];
+  const rows = useMemo(() => queueRows(applications, filters), [applications, filters]);
+  const activeFilters = Object.values(filters).filter(Boolean).length;
+  const hasNext = Boolean(queue.data?.cursor);
 
-      const gpa = item.gpa ? parseFloat(item.gpa) : null;
-      if (filters.gpaMin && (gpa === null || gpa < parseFloat(filters.gpaMin))) return false;
-      if (filters.gpaMax && (gpa === null || gpa > parseFloat(filters.gpaMax))) return false;
-
-      if (filters.humanMin && item.human_weighted_total < parseFloat(filters.humanMin)) return false;
-      if (filters.humanMax && item.human_weighted_total > parseFloat(filters.humanMax)) return false;
-
-      if (filters.aiMin && item.llm_weighted_score < parseFloat(filters.aiMin)) return false;
-      if (filters.aiMax && item.llm_weighted_score > parseFloat(filters.aiMax)) return false;
-
-      if (filters.varianceMin && item.variance_pct < parseFloat(filters.varianceMin)) return false;
-      if (filters.varianceMax && item.variance_pct > parseFloat(filters.varianceMax)) return false;
-
-      return true;
-    });
-  }, [data, filters]);
-
-  if (selectedAppKey) {
-    return (
-      <ReviewDetail
-        applicationKey={selectedAppKey}
-        onBack={() => {
-          setSelectedAppKey(null);
-          refetch();
-        }}
-      />
-    );
-  }
-
-  const totalReviews = filtered.length;
-  const totalPages = Math.ceil(totalReviews / PAGE_SIZE);
-  const pageReviews = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  const startIdx = page * PAGE_SIZE;
-
-  const activeFilterCount = Object.values(filters).filter(Boolean).length;
-
-  const clearFilters = () => {
-    setFilters({ appKey: "", major: "", gpaMin: "", gpaMax: "", humanMin: "", humanMax: "", aiMin: "", aiMax: "", varianceMin: "", varianceMax: "" });
-    setPage(0);
+  const tableState = {
+    isLoading: queue.isLoading,
+    isError: queue.isError,
+    unfilteredCount: applications.length,
+    showFilterEmpty: rows.length === 0,
   };
+
+  const changeFilter = (key: keyof QueueFilters, value: string) =>
+    setFilters((current) => ({ ...current, [key]: value }));
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-3">
+      <div className="flex items-start gap-3">
         <div className="flex-1">
-          <h1 className="text-2xl font-semibold tracking-tight">Review Queue</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            {totalReviews} applications{activeFilterCount > 0 ? ` (filtered from ${data?.reviews.length ?? 0})` : ""} flagged for human review.
+          <h1 className="text-2xl font-semibold tracking-tight">Review queue</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Applications where a reviewer and the model are far enough apart to need a second look
+            {queue.data ? `: ${queue.data.why}` : ""}.
           </p>
         </div>
-        <button
+        <Button
+          variant={showFilters || activeFilters > 0 ? "default" : "outline"}
+          size="sm"
           onClick={() => setShowFilters(!showFilters)}
-          className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${showFilters || activeFilterCount > 0 ? "bg-foreground text-background border-foreground" : "border-border hover:bg-accent"}`}
         >
-          Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
-        </button>
+          Filters{activeFilters > 0 ? ` (${activeFilters})` : ""}
+        </Button>
       </div>
 
-      {/* Filter Panel */}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <Badge variant="secondary">{rows.length} on this page</Badge>
+        {queue.data && (
+          <Badge variant="outline">{queue.data.disagreement_line} points apart or more</Badge>
+        )}
+        <span>Widest gap first. Sign-off is not available, so nothing here is signed off.</span>
+      </div>
+
+      {/* Two things a reviewer would expect of a queue and will not find. Saying it here beats
+          leaving them to work out that a row never leaves. */}
+      <NotBuilt instead="Upload a corrected score and the gap is worked out again.">
+        A row leaves this queue when the two totals come closer together, not when somebody reads
+        it — there is no sign-off and no way to clear a flag by hand.
+      </NotBuilt>
+
       {showFilters && (
-        <div className="p-4 rounded-lg border border-border bg-muted/30 space-y-3">
+        <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-4">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">Filter Reviews</span>
-            {activeFilterCount > 0 && (
-              <button onClick={clearFilters} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1">
-                <X className="h-3 w-3" /> Clear all
-              </button>
+            <span className="text-sm font-medium">Filter the queue</span>
+            {activeFilters > 0 && (
+              <Button variant="ghost" size="sm" onClick={() => setFilters(EMPTY_QUEUE_FILTERS)}>
+                <X /> Clear all
+              </Button>
             )}
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <FilterInput label="App Key" value={filters.appKey} onChange={(v) => { setFilters((f) => ({ ...f, appKey: v })); setPage(0); }} placeholder="Search..." />
-            <FilterInput label="Major" value={filters.major} onChange={(v) => { setFilters((f) => ({ ...f, major: v })); setPage(0); }} placeholder="Search..." />
-            <FilterRange label="GPA" min={filters.gpaMin} max={filters.gpaMax} onMinChange={(v) => { setFilters((f) => ({ ...f, gpaMin: v })); setPage(0); }} onMaxChange={(v) => { setFilters((f) => ({ ...f, gpaMax: v })); setPage(0); }} />
-            <FilterRange label="Human Score" min={filters.humanMin} max={filters.humanMax} onMinChange={(v) => { setFilters((f) => ({ ...f, humanMin: v })); setPage(0); }} onMaxChange={(v) => { setFilters((f) => ({ ...f, humanMax: v })); setPage(0); }} />
-            <FilterRange label="AI Score" min={filters.aiMin} max={filters.aiMax} onMinChange={(v) => { setFilters((f) => ({ ...f, aiMin: v })); setPage(0); }} onMaxChange={(v) => { setFilters((f) => ({ ...f, aiMax: v })); setPage(0); }} />
-            <FilterRange label="Variance %" min={filters.varianceMin} max={filters.varianceMax} onMinChange={(v) => { setFilters((f) => ({ ...f, varianceMin: v })); setPage(0); }} onMaxChange={(v) => { setFilters((f) => ({ ...f, varianceMax: v })); setPage(0); }} />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4 xl:grid-cols-6">
+            <FilterInput
+              label="Applicant"
+              value={filters.applicant}
+              onChange={(value) => changeFilter("applicant", value)}
+            />
+            <FilterInput
+              label="Major"
+              value={filters.major}
+              onChange={(value) => changeFilter("major", value)}
+            />
+            <FilterRange
+              label="GPA"
+              min={filters.gpaMin}
+              max={filters.gpaMax}
+              onMinChange={(value) => changeFilter("gpaMin", value)}
+              onMaxChange={(value) => changeFilter("gpaMax", value)}
+            />
+            <FilterRange
+              label="Reviewer score"
+              min={filters.reviewerMin}
+              max={filters.reviewerMax}
+              onMinChange={(value) => changeFilter("reviewerMin", value)}
+              onMaxChange={(value) => changeFilter("reviewerMax", value)}
+            />
+            <FilterRange
+              label="Model score"
+              min={filters.modelMin}
+              max={filters.modelMax}
+              onMinChange={(value) => changeFilter("modelMin", value)}
+              onMaxChange={(value) => changeFilter("modelMax", value)}
+            />
+            <FilterRange
+              label="Score gap"
+              min={filters.gapMin}
+              max={filters.gapMax}
+              onMinChange={(value) => changeFilter("gapMin", value)}
+              onMaxChange={(value) => changeFilter("gapMax", value)}
+            />
           </div>
+          <p className="text-xs text-muted-foreground">{NARROWS_THIS_PAGE}</p>
         </div>
       )}
 
-      {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading...</p>
-      ) : !data?.reviews.length ? (
-        <div className="text-center py-12 text-muted-foreground">
-          <p className="text-lg font-medium">No applications pending review</p>
-          <p className="text-sm mt-1">All variance flags have been resolved.</p>
-        </div>
-      ) : (
-        <>
-          <div className="border border-border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/50">
-                  <th className="text-left px-4 py-2.5 font-medium">Application</th>
-                  <th className="text-left px-4 py-2.5 font-medium">Scholarship</th>
-                  <th className="text-left px-4 py-2.5 font-medium">Major</th>
-                  <th className="text-right px-4 py-2.5 font-medium">GPA</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Human</th>
-                  <th className="text-right px-4 py-2.5 font-medium">AI</th>
-                  <th className="text-right px-4 py-2.5 font-medium">Variance</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pageReviews.map((item) => (
-                  <tr
-                    key={item.application_key}
-                    className="border-b border-border last:border-0 hover:bg-accent/30 transition-colors cursor-pointer"
-                    onClick={() => setSelectedAppKey(item.application_key)}
-                  >
-                    <td className="px-4 py-2.5 font-mono text-xs">
-                      {item.application_key.slice(0, 8)}...
-                    </td>
-                    <td className="px-4 py-2.5 text-xs">{item.availability_id ?? "—"}</td>
-                    <td className="px-4 py-2.5 truncate max-w-[180px]">{item.major ?? "—"}</td>
-                    <td className="px-4 py-2.5 text-right">{item.gpa ?? "—"}</td>
-                    <td className="px-4 py-2.5 text-right">{item.human_weighted_total}</td>
-                    <td className="px-4 py-2.5 text-right">{item.llm_weighted_score}</td>
-                    <td className="px-4 py-2.5 text-right text-red-600 font-medium">
-                      {item.variance_pct}%
-                    </td>
-                  </tr>
-                ))}
-                {pageReviews.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
-                      No reviews match the current filters.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+      <EmptyState
+        overlay={
+          hasEmptyMessage(tableState) && (
+            <TableEmptyOverlay
+              {...tableState}
+              error={{
+                icon: <TriangleAlert className="size-5" />,
+                title: "We could not load the queue",
+                subtitle: "Try again, and say something if it keeps happening.",
+              }}
+              empty={{
+                icon: <Search className="size-5" />,
+                title: "Nothing is flagged",
+                subtitle:
+                  "No application has a reviewer's total and the model's far enough apart to need a second look. Upload reviewer scores from the dashboard to fill this in.",
+              }}
+              filterEmpty={{
+                icon: <Search className="size-5" />,
+                title: "Nothing matched",
+                subtitle: NARROWS_THIS_PAGE,
+              }}
+            />
+          )
+        }
+      >
+        <Table>
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              {/* No width set here: a column is as wide as the longest thing in it, and the table
+                  scrolls sideways if they do not all fit. A width picked here squeezes a name into
+                  two lines on a wide window. */}
+              <TableHead>Applicant</TableHead>
+              <TableHead>Scholarship</TableHead>
+              <TableHead>Major</TableHead>
+              <TableHead>GPA</TableHead>
+              <TableHead>Reviewer</TableHead>
+              <TableHead>Model</TableHead>
+              <TableHead>Score gap</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((app) => (
+              <TableRow
+                key={app.sk}
+                className={onSelectApp ? "cursor-pointer" : undefined}
+                onClick={() => onSelectApp?.(app.student_uuid)}
+              >
+                <TableCell className="font-mono text-xs">
+                  {app.student_uuid.slice(0, 8)}…
+                </TableCell>
+                <TableCell>
+                  <ScholarshipCell scholarship={app.scholarship} year={app.year} />
+                </TableCell>
+                <TableCell>{app.major ?? "—"}</TableCell>
+                <TableCell className="tabular-nums">{app.gpa ?? "—"}</TableCell>
+                {/* The average of the reviewers who scored it, and how many that was — one
+                    reviewer and three are read very differently. */}
+                <TableCell className="tabular-nums">
+                  {app.reviewer_total ?? "—"}
+                  {app.reviewer_count && app.reviewer_count > 1 && (
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      avg of {app.reviewer_count}
+                    </span>
+                  )}
+                </TableCell>
+                <TableCell className="tabular-nums">{app.total_score ?? "—"}</TableCell>
+                <TableCell className="tabular-nums font-medium">{app.score_gap}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </EmptyState>
 
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between px-1">
-              <p className="text-sm text-muted-foreground">
-                Showing {startIdx + 1}–{Math.min(startIdx + PAGE_SIZE, totalReviews)} of {totalReviews}
-              </p>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setPage((p) => Math.max(0, p - 1))}
-                  disabled={page === 0}
-                  className="p-1.5 rounded-md hover:bg-accent transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                  aria-label="Previous page"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </button>
-                <span className="text-sm font-medium">
-                  Page {page + 1} of {totalPages}
-                </span>
-                <button
-                  onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-                  disabled={page >= totalPages - 1}
-                  className="p-1.5 rounded-md hover:bg-accent transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                  aria-label="Next page"
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function FilterInput({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
-  return (
-    <div>
-      <label className="text-xs text-muted-foreground">{label}</label>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="mt-1 w-full h-8 px-2.5 rounded-md border border-border bg-background text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+      <Paging
+        page={page}
+        showing={rows.length}
+        hasNext={hasNext}
+        onPrevious={() => setPage((current) => Math.max(0, current - 1))}
+        onNext={() => {
+          const marker = queue.data?.cursor ?? null;
+          setCursors((current) => (current.length > page + 1 ? current : [...current, marker]));
+          setPage((current) => current + 1);
+        }}
       />
     </div>
   );
 }
 
-function FilterRange({ label, min, max, onMinChange, onMaxChange }: { label: string; min: string; max: string; onMinChange: (v: string) => void; onMaxChange: (v: string) => void }) {
+/** The wording the export used for the scholarship, with the year it belongs to. */
+function ScholarshipCell({ scholarship, year }: { scholarship: string; year: string }) {
+  const named = useScholarshipName(scholarship);
   return (
-    <div>
-      <label className="text-xs text-muted-foreground">{label}</label>
-      <div className="mt-1 flex gap-1.5">
-        <input
-          type="number"
-          value={min}
-          onChange={(e) => onMinChange(e.target.value)}
-          placeholder="Min"
-          className="w-full h-8 px-2.5 rounded-md border border-border bg-background text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-        />
-        <input
-          type="number"
-          value={max}
-          onChange={(e) => onMaxChange(e.target.value)}
-          placeholder="Max"
-          className="w-full h-8 px-2.5 rounded-md border border-border bg-background text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-        />
-      </div>
-    </div>
+    <span>
+      {named} <span className="text-muted-foreground">{year}</span>
+    </span>
   );
 }

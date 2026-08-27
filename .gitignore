@@ -5,9 +5,13 @@ awsx
 # institutional data pulled from s3 — do not commit
 materials/
 
-# personal project notes + local claude settings (holds api keys) — local only
+# scholarship exports — real applicant essays, never commit
+*.csv
+*.xlsx
+
+# personal project notes + local claude config (agents, skills, api keys) — local only
 CLAUDE.local.md
-.claude/settings.local.json
+.claude/
 
 # node / monorepo build junk
 node_modules/

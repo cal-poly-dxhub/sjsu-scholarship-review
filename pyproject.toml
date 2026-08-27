@@ -1,0 +1,16 @@
+[project]
+name = "sjsu-scholarship-lambdas"
+version = "0.1.0"
+description = "The Lambdas behind the scholarship review app."
+requires-python = ">=3.13"
+# What the runtime already ships. Nothing here is bundled — boto3 comes with Lambda, and
+# openpyxl comes in its own layer built from lambdas/requirements/.
+dependencies = ["boto3"]
+
+[project.optional-dependencies]
+dev = ["pytest", "moto[dynamodb]", "openpyxl"]
+
+[tool.pytest.ini_options]
+testpaths = ["lambdas/tests"]
+# The handlers import `shared.x`, the same way they do in Lambda, so the tests do too.
+pythonpath = ["lambdas", "lambdas/tests"]

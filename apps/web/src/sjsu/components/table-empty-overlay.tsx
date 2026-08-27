@@ -10,26 +10,32 @@ export type EmptyOverlayContent = {
   action?: ReactNode;
 };
 
-export function TableEmptyOverlay({
-  isLoading,
-  isError,
-  unfilteredCount,
-  showFilterEmpty,
-  error,
-  empty,
-  filterEmpty,
-}: {
+/** Which of the four states the table is in, which decides whether there is a message at all. */
+export interface TableState {
   isLoading: boolean;
   isError: boolean;
   unfilteredCount: number;
   showFilterEmpty: boolean;
-  error: EmptyOverlayContent;
-  empty: EmptyOverlayContent;
-  filterEmpty: EmptyOverlayContent;
-}) {
-  if (isLoading) return null;
-  if (isError) return <EmptyStateOverlay {...error} />;
-  if (unfilteredCount === 0) return <EmptyStateOverlay {...empty} />;
-  if (showFilterEmpty) return <EmptyStateOverlay {...filterEmpty} />;
-  return null;
+}
+
+/**
+ * Whether this state has a message. A caller needs to know before it renders: the fade behind a
+ * message would otherwise wash out a table that is perfectly readable.
+ */
+export function hasEmptyMessage(state: TableState): boolean {
+  if (state.isLoading) return false;
+  return state.isError || state.unfilteredCount === 0 || state.showFilterEmpty;
+}
+
+export function TableEmptyOverlay(
+  props: TableState & {
+    error: EmptyOverlayContent;
+    empty: EmptyOverlayContent;
+    filterEmpty: EmptyOverlayContent;
+  },
+) {
+  if (!hasEmptyMessage(props)) return null;
+  if (props.isError) return <EmptyStateOverlay {...props.error} />;
+  if (props.unfilteredCount === 0) return <EmptyStateOverlay {...props.empty} />;
+  return <EmptyStateOverlay {...props.filterEmpty} />;
 }

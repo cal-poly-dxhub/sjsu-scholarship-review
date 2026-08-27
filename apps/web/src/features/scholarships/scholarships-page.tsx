@@ -1,68 +1,80 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/api";
+import { Button } from "@/sjsu/components/ui/button";
+import { isAcademicYear } from "@/lib/academic-year";
+import { CohortPicker, type CohortChoice } from "@/features/cohorts/cohort-picker";
+import { ReviewDetail } from "@/features/reviews/review-detail";
 import { ApplicationsList } from "./applications-list";
 import { ApplicationDetail } from "./application-detail";
 
-interface ScholarshipsResponse {
-  scholarships: string[];
+/**
+ * A cohort is addressed by scholarship and year, so that pair is what this screen asks for. The
+ * pair is picked from what has been ingested rather than typed, because the scholarship half is a
+ * slug built from the export's wording and a wrong guess reads as an empty cohort.
+ */
+
+/** One application, open either to read or to score by hand. */
+interface Open {
+  studentUuid: string;
+  mode: "read" | "score";
 }
 
 export function ScholarshipsPage() {
-  const [selectedScholarship, setSelectedScholarship] = useState<string | null>(null);
-  const [selectedAppKey, setSelectedAppKey] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<CohortChoice>({ scholarship: "", year: "" });
+  const [cohort, setCohort] = useState<{ scholarship: string; year: string } | null>(null);
+  const [open, setOpen] = useState<Open | null>(null);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["scholarships"],
-    queryFn: () => api<ScholarshipsResponse>("/scholarships"),
-  });
+  if (cohort && open?.mode === "score") {
+    return (
+      <ReviewDetail
+        scholarship={cohort.scholarship}
+        year={cohort.year}
+        studentUuid={open.studentUuid}
+        onBack={() => setOpen(null)}
+      />
+    );
+  }
 
-  // Detail view for a specific application
-  if (selectedAppKey) {
+  if (cohort && open) {
     return (
       <ApplicationDetail
-        applicationKey={selectedAppKey}
-        onBack={() => setSelectedAppKey(null)}
+        scholarship={cohort.scholarship}
+        year={cohort.year}
+        studentUuid={open.studentUuid}
+        onBack={() => setOpen(null)}
+        onScore={() => setOpen({ studentUuid: open.studentUuid, mode: "score" })}
       />
     );
   }
 
-  // Applications list for a selected scholarship
-  if (selectedScholarship) {
+  if (cohort) {
     return (
       <ApplicationsList
-        availabilityId={selectedScholarship}
-        onBack={() => setSelectedScholarship(null)}
-        onSelectApp={setSelectedAppKey}
+        scholarship={cohort.scholarship}
+        year={cohort.year}
+        onBack={() => setCohort(null)}
+        onSelectApp={(studentUuid) => setOpen({ studentUuid, mode: "read" })}
+        onScoreApp={(studentUuid) => setOpen({ studentUuid, mode: "score" })}
       />
     );
   }
 
-  // Scholarship list
+  const ready = chosen.scholarship !== "" && isAcademicYear(chosen.year);
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Scholarships</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Select a scholarship to view ranked applications.
+        <p className="mt-1 text-sm text-muted-foreground">
+          Pick a cohort to read its applications.
         </p>
       </div>
 
-      {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading...</p>
-      ) : (
-        <div className="space-y-2">
-          {data?.scholarships.map((scholarship) => (
-            <button
-              key={scholarship}
-              onClick={() => setSelectedScholarship(scholarship)}
-              className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent/50 transition-colors"
-            >
-              <span className="font-medium">{scholarship}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="space-y-3">
+        <CohortPicker value={chosen} onChange={setChosen} />
+        <Button disabled={!ready} onClick={() => ready && setCohort({ ...chosen })}>
+          Open cohort
+        </Button>
+      </div>
     </div>
   );
 }
