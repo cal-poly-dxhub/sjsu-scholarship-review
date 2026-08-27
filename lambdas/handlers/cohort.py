@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from shared.http import BadRequest, query_param, reply, year_of
-from shared.reads import cohort, counts
+from shared.reads import SCREEN_FIELDS, cohort, counts
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -24,7 +24,7 @@ def handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
     except BadRequest as error:
         return reply(400, {"message": str(error)})
 
-    applications = cohort(scholarship, year)
+    applications = cohort(scholarship, year, fields=SCREEN_FIELDS)
     log.info("read %d applications for %s %s", len(applications), scholarship, year)
     return reply(
         200,
