@@ -197,8 +197,7 @@ h1 {
   }
 }
 
-/* Fix text selection in all overlay components (vaul, Radix Dialog/Sheet/Popover) */
-[data-vaul-drawer],
+/* Fix text selection in all overlay components (Radix Dialog/Sheet/Popover) */
 [data-radix-dialog-content],
 [data-radix-popover-content],
 [role="dialog"] {
@@ -215,8 +214,6 @@ h1 {
   -webkit-user-select: text !important;
 }
 
-[data-vaul-drawer] input,
-[data-vaul-drawer] textarea,
 [data-radix-dialog-content] input,
 [data-radix-dialog-content] textarea,
 [role="dialog"] input,
