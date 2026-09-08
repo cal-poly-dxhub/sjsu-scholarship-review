@@ -10,7 +10,7 @@ bin/app.ts          entry point — reads the environment name, makes the three 
 lib/env.ts          the environment name and the props every stack takes
 lib/data-stack.ts   DynamoDB table + environment bucket — outlives the others, RETAIN
 lib/edge-stack.ts   user pool, hosted UI, site bucket, CloudFront, the HTTP API
-lib/compute-stack.ts route handlers, ingest worker, the two scoring workers
+lib/compute-stack.ts route handlers, the ingest workers, the scoring workers
 ```
 
 Stacks are split by how long the thing inside them lives, not by phase. The data
@@ -24,11 +24,11 @@ pool still carries `RETAIN`, so destroying the stack does not take the accounts.
 
 ## Running it
 
-Everything runs against the `dxhub-automation` profile.
+The account and region come from the profile you run with — nothing here pins either.
 
 ```bash
-aws sso login --profile dxhub-automation
-export AWS_PROFILE=dxhub-automation
+aws sso login --profile <your-profile>
+export AWS_PROFILE=<your-profile>
 
 pnpm --filter @sjsu/infra exec cdk list
 pnpm --filter @sjsu/infra exec cdk synth
@@ -39,16 +39,21 @@ The environment name comes from CDK context. `cdk.json` defaults it to `dev`; pa
 `-c env=<name>` for anything else. It is part of every stack name and every resource
 name that has to be unique, so two environments can share an account.
 
-`cdk bootstrap` is a one-time step per account and region. `dxhub-automation` in
-`us-west-2` is already bootstrapped at version 32.
+`cdk bootstrap` is a one-time step per account and region. A fresh account needs it
+before the first deploy.
 
 ## Deploy order
 
-`DataStack`, then `EdgeStack`. Data first because everything else references it.
-`ComputeStack` is empty until phase 2.
+`EdgeStack`, then `DataStack`, then `ComputeStack`. Edge first because the environment
+bucket answers the upload preflight for the site's own origin, which is the CloudFront
+domain, and `DataStack` takes that domain as a string. `ComputeStack` needs both.
+`cdk deploy --all` works this out itself.
 
-`http://localhost:5173` is a callback alongside the CloudFront domain, so the Vite dev
+`http://localhost:3000` is a callback alongside the CloudFront domain, so the Vite dev
 server signs in against the same pool.
+
+Step-by-step instructions, including building and uploading the website, are in the
+"Deployment" section of the root `README.md`.
 
 ## Who can sign in
 
@@ -69,12 +74,10 @@ policy is 12 characters with upper case, lower case, and a digit.
 
 ## The stores
 
-The `sjsu-*` tables and the export bucket that local dev used to point at were
-destroyed in the account. CDK creates the stores from nothing — there is nothing to
-import and no data to migrate. The first deploy comes up empty, and a workbook has to
-be ingested before any screen has something to show.
+CDK creates the stores from nothing — there is nothing to import and no data to
+migrate. The first deploy comes up empty, and a workbook has to be ingested before any
+screen has something to show.
 
-The old three-table split went with them. One table now, keyed `pk` and `sk`, with
-`COHORT#`, `APP#`, and `RUBRIC#` prefixes doing what the table names used to do.
-Those two key attributes are the one thing that cannot be changed after the table
-exists.
+One table, keyed `pk` and `sk`, with `COHORT#`, `APP#`, and `RUBRIC#` prefixes standing
+in for what separate tables would have done. Those two key attributes are the one thing
+that cannot be changed after the table exists.
